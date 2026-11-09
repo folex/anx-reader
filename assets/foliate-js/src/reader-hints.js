@@ -93,7 +93,7 @@ export function normalizeHintTags(raw, maxCategories = 16, maxValues = 16) {
     return Object.fromEntries(entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
 }
 
-const hintSelector = '[data-anx-hint-highlight], [data-anx-pdf-hint], rt, [data-anx-ai-ref], .anx-edit-ref-wrap, .rl-ref'
+const hintSelector = '[data-anx-hint-highlight], [data-anx-pdf-hint], rt:not([data-anx-ruby-container]), [data-anx-ruby-gloss], [data-anx-ai-ref], .anx-edit-ref-wrap, .rl-ref'
 function hintTags(element) {
     let tags = {}
     try {

@@ -44,6 +44,7 @@ export async function preparePdfEdits(doc, input, records) {
     const next = [...records], results = []
     for (const item of items) {
         const spec = validateEpubEdit(item)
+        if (spec.mode) throw new Error('Ruby append/overwrite is currently supported only in EPUB')
         const requestHash = await digest(JSON.stringify(spec))
         const prior = next.find(x => x.spec.operationId === spec.operationId)
         if (prior) {

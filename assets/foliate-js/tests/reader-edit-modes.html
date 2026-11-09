@@ -1,0 +1,39 @@
+<meta charset="utf-8"><script type="module">
+import {prepareEpubEdit,textMap} from '../src/epub-edit.js';
+import {installReaderHintFilters,setReaderHintFilter} from '../src/reader-hints.js';
+const prepareEpubEditForError=async(source,input)=>{try{await prepareEpubEdit(source,input,'test');return ''}catch(e){return String(e)}};
+window.runTests=async()=>{
+ const checks=[];const check=(name,ok)=>checks.push({name,ok:!!ok});
+ const source='<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>La lluvia caía. Marta volvió.</p></body></html>';
+ const spec={type:'ruby',operationId:'old',quote:'lluvia',contextBefore:'La',text:'дождь',tags:{language:['RU']}};
+ const first=await prepareEpubEdit(source,spec,'test');
+ const app=await prepareEpubEdit(first.xhtml,{...spec,operationId:'app',text:'rain',tags:{language:['EN']},mode:'append'},'test');
+ const parse=x=>new DOMParser().parseFromString(x,'application/xhtml+xml');
+ const d=parse(app.xhtml);
+ check('Append keeps both glosses above one base word without nested ruby',d.querySelectorAll('ruby').length===1&&d.querySelector('rt').textContent.includes('дождь')&&d.querySelector('rt').textContent.includes('rain'));
+ check('Original paragraph survives append',textMap(d.querySelector('p')).text==='La lluvia caía. Marta volvió.');
+ const again=await prepareEpubEdit(app.xhtml,{...spec,operationId:'app',text:'rain',tags:{language:['EN']},mode:'append'},'test');check('Append retries are idempotent',again.unchanged);
+ const over=await prepareEpubEdit(app.xhtml,{...spec,operationId:'over',text:'agua',mode:'overwrite'},'test');const o=parse(over.xhtml);
+ check('Overwrite replaces existing glosses without duplicating base text',o.querySelectorAll('ruby').length===1&&o.querySelector('rt').textContent==='agua'&&textMap(o.querySelector('p')).text==='La lluvia caía. Marta volvió.');
+ const frame=document.createElement('iframe'); document.body.appendChild(frame);
+ frame.contentDocument.open();frame.contentDocument.write(app.xhtml);frame.contentDocument.close();
+ const host={document:frame.contentDocument,reader:{view:{renderer:{getContents:()=>[]}}}};
+ setReaderHintFilter({only:{language:['EN']}},host);
+ const spans=frame.contentDocument.querySelectorAll('[data-anx-ruby-gloss]');
+ check('Appended glosses keep independent tag filters',spans.length===2&&spans[0].hasAttribute('data-anx-hint-filtered')&&!spans[1].hasAttribute('data-anx-hint-filtered')&&!spans[1].parentElement.hasAttribute('data-anx-hint-filtered'));
+ const readd=await prepareEpubEdit(over.xhtml,{...spec,operationId:'readd',text:'rain',tags:{language:['EN']},mode:'append'},'test');
+ check('A superseded gloss can be appended again with a new operation',!readd.unchanged&&parse(readd.xhtml).querySelector('rt').textContent.includes('rain'));
+ const retry=await prepareEpubEdit(over.xhtml,spec,'test');check('Retrying an overwritten operation does not restore the old gloss',retry.unchanged);
+ const legacy=await prepareEpubEditForError(first.xhtml,{...spec,operationId:'legacy',text:'other'});
+ check('Omitting mode preserves legacy overlap rejection',legacy.includes('already has ruby'));
+ const paragraph='La lluvia caía sobre las calles vacías. Marta decidió volver a casa antes del anochecer. Aunque estaba cansada, siguió caminando sin detenerse.';
+ const chapter='<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>'+paragraph+'</p></body></html>';
+ const batch=mode=>({items:[...paragraph.matchAll(/\p{L}+/gu)].map((m,i)=>({type:'ruby',operationId:mode+'-'+i,quote:m[0],contextBefore:paragraph.slice(0,m.index).trim(),contextAfter:paragraph.slice(m.index+m[0].length).trim(),text:mode,...(mode==='new'?{}:{mode})}))});
+ const start=performance.now();const all=await prepareEpubEdit(chapter,batch('new'),'batch');
+ const allOver=await prepareEpubEdit(all.xhtml,batch('overwrite'),'batch');
+ const allApp=await prepareEpubEdit(allOver.xhtml,batch('append'),'batch');
+ const b=parse(allApp.xhtml);
+ check('Whole paragraph batches create, overwrite and append all 22 words',b.querySelectorAll('ruby').length===22&&b.querySelectorAll('[data-anx-ruby-gloss]').length===44&&[...b.querySelectorAll('rt')].every(rt=>rt.textContent==='overwriteappend')&&textMap(b.querySelector('p')).text===paragraph);
+ return {ok:checks.every(x=>x.ok),checks,metrics:[{name:'22 word create+overwrite+append total milliseconds',value:performance.now()-start}]};
+};
+</script>

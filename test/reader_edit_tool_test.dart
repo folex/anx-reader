@@ -46,6 +46,20 @@ void main() {
       'right',
     );
   });
+  test('ruby supports explicit append and overwrite in one batch', () {
+    final batch = parseReaderEditInput({
+      'items': [
+        {...valid, 'mode': 'append'},
+        {...valid, 'operationId': 'replace', 'mode': 'overwrite'},
+      ],
+    }, ruby: true);
+    expect(batch['items'][0]['mode'], 'append');
+    expect(batch['items'][1]['mode'], 'overwrite');
+    expect(() => parseReaderEditInput({...valid, 'mode': 'delete'}, ruby: true),
+        throwsFormatException);
+    expect(() => parseReaderEditInput({...valid, 'mode': 'append'}, ruby: false),
+        throwsFormatException);
+  });
   test('ambiguous, unbounded and arbitrary fields are rejected', () {
     for (final input in [
       {...valid}..remove('contextBefore'),

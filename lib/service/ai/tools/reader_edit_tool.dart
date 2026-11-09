@@ -108,6 +108,13 @@ Map<String, dynamic> _readerEditSingleSchema(
               'Optional arbitrary categories with values, e.g. {"difficulty":["C1"],"topic":["food"],"grammar":["subjunctive"]}. User-defined categories/levels are allowed. These are filterable tags, not inferred certainty. Use the user requested vocabulary; do not guess CEFR difficulty. Category names max32 characters. Untagged legacy hints keep their original levels.',
         },
         if (ruby)
+          'mode': {
+            'type': 'string',
+            'enum': ['append', 'overwrite'],
+            'description':
+                'For an already annotated word: append keeps existing glosses and adds this one; overwrite replaces them. Omit to reject overlap. Use one items batch for an entire paragraph.',
+          },
+        if (ruby)
           'alignment': {
             'type': 'string',
             'enum': ['left', 'center', 'right'],
@@ -158,6 +165,7 @@ Map<String, dynamic> readerEditSchema(
               'tier',
               'tags',
               'alignment',
+              'mode',
               'color',
             ])
               {

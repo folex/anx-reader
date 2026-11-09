@@ -15,13 +15,16 @@ import 'langchain_ai_config.dart';
 
 /// Factory responsible for building chat models based on user preferences.
 class LangchainAiRegistry {
-  const LangchainAiRegistry(this.ref);
+  const LangchainAiRegistry(
+    this.ref, {
+    this.toolIdsOverride,
+    this.editChapterHref,
+  });
+  final String? editChapterHref;
+  final List<String>? toolIdsOverride;
   final WidgetRef? ref;
 
-  LangchainPipeline resolve(
-    LangchainAiConfig config, {
-    bool useAgent = false,
-  }) {
+  LangchainPipeline resolve(LangchainAiConfig config, {bool useAgent = false}) {
     switch (config.identifier) {
       case 'claude':
         return _buildPipeline(
@@ -30,20 +33,12 @@ class LangchainAiRegistry {
           useAgent: useAgent,
         );
       case 'gemini':
-        return _buildPipeline(
-          config,
-          _buildGoogle(config),
-          useAgent: useAgent,
-        );
+        return _buildPipeline(config, _buildGoogle(config), useAgent: useAgent);
       case 'deepseek':
       case 'openrouter':
       case 'openai':
       default:
-        return _buildPipeline(
-          config,
-          _buildOpenAi(config),
-          useAgent: useAgent,
-        );
+        return _buildPipeline(config, _buildOpenAi(config), useAgent: useAgent);
     }
   }
 
@@ -61,17 +56,9 @@ class LangchainAiRegistry {
           useAgent: useAgent,
         );
       case AiProtocol.gemini:
-        return _buildPipeline(
-          config,
-          _buildGoogle(config),
-          useAgent: useAgent,
-        );
+        return _buildPipeline(config, _buildGoogle(config), useAgent: useAgent);
       case AiProtocol.openai:
-        return _buildPipeline(
-          config,
-          _buildOpenAi(config),
-          useAgent: useAgent,
-        );
+        return _buildPipeline(config, _buildOpenAi(config), useAgent: useAgent);
     }
   }
 
@@ -118,8 +105,15 @@ class LangchainAiRegistry {
     ChatMessage? systemMessage;
 
     if (useAgent) {
-      final enabledIds = Prefs().enabledAiToolIds;
-      final toolContext = AiToolContext(ref: ref!);
+      final enabledIds = AiToolRegistry.sanitizeIds(
+        toolIdsOverride ??
+            [...Prefs().enabledAiToolIds, ...libraryBookToolIds,
+              if (isReading) ...readerBookToolIds],
+      ).where((id) => isReading || !readerBookToolIds.contains(id)).toList();
+      final toolContext = AiToolContext(
+        ref: ref!,
+        editChapterHref: editChapterHref,
+      );
       tools = AiToolRegistry.buildTools(toolContext, enabledIds);
       final enabledDefs = AiToolRegistry.definitions
           .where((def) => enabledIds.contains(def.id))
@@ -162,7 +156,8 @@ class LangchainAiRegistry {
       'tr': 'Türkçe',
     };
 
-    final languageName = languageMap[currentLanguageCode] ??
+    final languageName =
+        languageMap[currentLanguageCode] ??
         languageMap[currentLanguageCode.split('_').first] ??
         currentLanguageCode;
 

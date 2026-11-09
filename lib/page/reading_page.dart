@@ -1,4 +1,19 @@
+import 'package:anx_reader/models/reader_hint_filter.dart';
+import 'package:anx_reader/widgets/ai/reader_hint_settings.dart';
+import 'package:anx_reader/widgets/ai/book_illustrations_sheet.dart';
+import 'dart:convert';
+import 'package:anx_reader/utils/js/js_call.dart';
 import 'dart:async';
+import 'package:anx_reader/providers/ai_chat.dart';
+import 'package:anx_reader/providers/current_reading.dart';
+import 'package:anx_reader/providers/ai_providers.dart';
+import 'package:anx_reader/service/chatgpt/chatgpt_plan.dart';
+import 'package:anx_reader/service/voice/assistant_session.dart';
+import 'package:anx_reader/service/voice/book_assistant_turn.dart';
+import 'package:anx_reader/service/voice/reader_assistant_context.dart';
+import 'package:anx_reader/widgets/ai/floating_book_assistant.dart';
+import 'package:anx_reader/utils/ai_reasoning_parser.dart';
+import 'package:langchain_core/chat_models.dart';
 import 'dart:math' as math;
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
@@ -70,6 +85,176 @@ class ReadingPageState extends ConsumerState<ReadingPage>
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   late Book _book;
   late Widget _currentPage = empty;
+  String? _aiSelectedText;
+  String? _selectionCfi;
+  late final BookAssistantTurn _assistantTurn;
+  late final AssistantSession _assistant;
+  bool _floatingChatVisible = false;
+  bool _voiceOwnsTurn = false;
+  final Object _assistantRequestOwner = Object();
+  int _assistantRevision = 0;
+  String? _assistantDraft;
+  String? _lastAssistantScope;
+
+  String _assistantIdentity() {
+    if (!mounted) return 'reader-disposed';
+    final reading = ref.read(currentReadingProvider);
+    final plan = ChatGptPlan.instance;
+    final service = Prefs().selectedAiService;
+    final config = Prefs().getAiConfig(service);
+    final providerIdentity = Object.hash(
+      config['url'],
+      config['api_key'],
+      config['model'],
+    );
+    return '${reading.isReading}:${reading.book?.id}:${plan.enabled}:${plan.active?.id}:${plan.active?.model}:$service:$providerIdentity';
+  }
+
+  String _assistantScope() {
+    if (!mounted) return 'reader-disposed';
+    final chat = ref.read(aiChatProvider.notifier);
+    return '${_assistantIdentity()}:${chat.currentSessionId}:${chat.conversationEpoch}';
+  }
+
+  Future<void> _prepareAssistantConversation() => prepareBookAssistantIdentity(
+        identity: _assistantIdentity,
+        prepare: () =>
+            ref.read(aiChatProvider.notifier).ensureSessionForVoice(),
+      );
+
+  void _assistantContextChanged() {
+    if (!mounted) return;
+    final scope = _assistantScope();
+    if (_lastAssistantScope != null && _lastAssistantScope != scope) {
+      _assistant.onContextChanged();
+      _assistantTurn.contextChanged();
+    }
+    _lastAssistantScope = scope;
+  }
+
+  Future<String?> _assistantContext() async {
+    dynamic viewport;
+    try {
+      viewport = await epubPlayerKey.currentState?.webViewController
+          .evaluateJavascript(source: readerAssistantViewportScript);
+    } catch (_) {}
+    final reading = ref.read(currentReadingProvider);
+    return buildReaderTutorContext(
+      title: _book.title,
+      chapter: reading.chapterTitle ?? '',
+      viewport: viewport,
+      selectionFallback: reading.cfi == _selectionCfi ? _aiSelectedText : null,
+    );
+  }
+
+  Future<void> _startBookVoice(String language) async {
+    if (_assistantTurn.busy) return;
+    try {
+      await aiChatKey.currentState?.cancelVoiceInput();
+      if (audioHandler.playbackState.value.playing) await audioHandler.pause();
+      await _prepareAssistantConversation();
+      if (!mounted) return;
+      _lastAssistantScope = _assistantScope();
+      await _assistant.start(language: language);
+    } catch (e) {
+      AnxToast.show('$e');
+    }
+  }
+
+  void _closeBookAssistant() {
+    _assistant.stop();
+    setState(() => _floatingChatVisible = false);
+  }
+
+  Future<void> _showIllustrations() async {
+    final player = epubPlayerKey.currentState;
+    if (player == null) return;
+    await _assistant.pause();
+    if (!mounted) return;
+    await showBookIllustrations(
+      context,
+      handle: (input) => player.readerImageOperation(input),
+      onImported: (id) {
+        if (!mounted) return;
+        showAiChat(
+            content:
+                'Insert the illustration I just imported after the paragraph I am reading or the selected passage. Use the most recent imported image and the exact visible text; if the place is ambiguous, ask me.',
+            sendImmediate: true);
+      },
+    );
+  }
+
+  Future<void> _showReadingHints() async {
+    final controller = epubPlayerKey.currentState?.webViewController;
+    if (controller == null) return;
+    await _assistant.pause();
+    final bookId = _book.id;
+    final preferenceKey = 'readerHintFilter:$bookId';
+    bool current() =>
+        mounted && ref.read(currentReadingProvider).book?.id == bookId;
+    Future<Map<String, List<String>>> readTags() async {
+      final raw =
+          await controller.evaluateJavascript(source: 'getReaderHintTags()');
+      return normalizeHintTags(raw is String ? jsonDecode(raw) : raw,
+          maxCategories: 128, maxValues: 512);
+    }
+
+    try {
+      final raw = await controller.evaluateJavascript(
+          source: 'getReaderHintControls()');
+      final decoded = raw is String ? jsonDecode(raw) : raw;
+      final controls =
+          decoded is List ? decoded.whereType<Map>().toList() : <Map>[];
+      final tags = await readTags();
+      final saved =
+          ReaderHintFilter.fromJson(Prefs().prefs.getString(preferenceKey));
+      final filter = ReaderHintFilter(
+          only: saved.only,
+          exclude: saved.exclude,
+          catalog: saved.tagsWith(tags));
+      if (!current()) return;
+      await Prefs().prefs.setString(preferenceKey, filter.toJson());
+      if (!current()) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => ReaderHintSettings(
+          controls: controls,
+          tags: tags,
+          filter: filter,
+          setLevel: (id, value) async {
+            if (!current()) throw StateError('Book changed');
+            return await controller.evaluateJavascript(
+                    source: jsCall('setReaderHintLevel', [id, value])) ==
+                true;
+          },
+          setFilter: (next) async {
+            if (!current()) throw StateError('Book changed');
+            final changed = await controller.evaluateJavascript(
+                source: jsCall('setReaderHintFilter', [next.toRules()]));
+            if (changed != true || !current())
+              throw StateError('Could not apply filter');
+            await Prefs().prefs.setString(preferenceKey, next.toJson());
+          },
+          refresh: controls.any((control) =>
+                  control['id']?.toString().startsWith('live:') ?? false)
+              ? () async {
+                  if (!current()) throw StateError('Book changed');
+                  await controller.evaluateJavascript(
+                      source: 'refreshReaderHints()');
+                  return readTags();
+                }
+              : null,
+        ),
+      );
+    } catch (_) {
+      if (mounted)
+        AnxToast.show(
+            'Could not load reading hints. Reopen the chapter and try again.');
+    }
+  }
+
   final Stopwatch _readTimeWatch = Stopwatch();
   DateTime? _sessionStart;
   Timer? _awakeTimer;
@@ -91,6 +276,54 @@ class ReadingPageState extends ConsumerState<ReadingPage>
   @override
   void initState() {
     _readerFocusNode = FocusNode(debugLabel: 'reading_page_focus');
+    _assistantTurn = BookAssistantTurn(
+      prepare: _prepareAssistantConversation,
+      context: _assistantContext,
+      scope: _assistantScope,
+      cancelBackend: () {
+        if (ref.read(aiChatProvider.notifier).ownsTurn(_assistantRequestOwner))
+          cancelActiveAiRequest();
+      },
+      stream: (question, extra) => ref
+          .read(aiChatProvider.notifier)
+          .sendMessageStream(
+            question,
+            ref,
+            false,
+            transientContext: extra,
+            requestOwner: _assistantRequestOwner,
+            assistantMode: true,
+          )
+          .map((messages) {
+        final answers = messages.whereType<AIChatMessage>();
+        if (answers.isEmpty) return '';
+        if (mounted &&
+            answers.last.content.trim() ==
+                L10n.of(context).aiServiceNotConfigured) {
+          throw StateError(answers.last.content);
+        }
+        return parseReasoningContent(answers.last.content)
+            .answerTimeline
+            .where((entry) => entry.type == ParsedReasoningEntryType.reply)
+            .map((entry) => entry.text ?? '')
+            .join('\n');
+      }),
+    );
+    _assistant = AssistantSession(
+      currentScope: _assistantScope,
+      cancelQuestion: () {
+        if (_voiceOwnsTurn) _assistantTurn.cancel();
+      },
+      sendQuestion: (question) async {
+        _voiceOwnsTurn = true;
+        try {
+          return await _assistantTurn.send(question);
+        } finally {
+          _voiceOwnsTurn = false;
+        }
+      },
+    );
+    ChatGptPlan.instance.addListener(_assistantContextChanged);
 
     // Initialize AI panel sizes from persistent storage
     _aiChatWidth = Prefs().aiPanelWidth;
@@ -134,6 +367,9 @@ class ReadingPageState extends ConsumerState<ReadingPage>
 
   @override
   void dispose() {
+    ChatGptPlan.instance.removeListener(_assistantContextChanged);
+    _assistant.dispose();
+    _assistantTurn.dispose();
     Sync().syncData(SyncDirection.upload, ref, trigger: SyncTrigger.auto);
     _readTimeWatch.stop();
     _awakeTimer?.cancel();
@@ -265,6 +501,10 @@ class ReadingPageState extends ConsumerState<ReadingPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed) {
+      _assistant.onBackground();
+      aiChatKey.currentState?.cancelVoiceInput();
+    }
     switch (state) {
       case AppLifecycleState.resumed:
         if (!_readTimeWatch.isRunning) {
@@ -286,10 +526,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
           if (elapsedSeconds > 5) {
             epubPlayerKey.currentState?.saveReadingProgress();
             readingTimeDao.insertReadingTime(
-              ReadingTime(
-                bookId: _book.id,
-                readingTime: elapsedSeconds,
-              ),
+              ReadingTime(bookId: _book.id, readingTime: elapsedSeconds),
               startedAt: _sessionStart,
             );
           }
@@ -380,9 +617,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
 
   Future<void> ttsHandler() async {
     setState(() {
-      _currentPage = TtsWidget(
-        epubPlayerKey: epubPlayerKey,
-      );
+      _currentPage = TtsWidget(epubPlayerKey: epubPlayerKey);
     });
   }
 
@@ -449,15 +684,14 @@ class ReadingPageState extends ConsumerState<ReadingPage>
 
   Future<void> onLoadEnd() async {
     if (Prefs().autoSummaryPreviousContent) {
-      final previousContent =
-          await epubPlayerKey.currentState!.previousContent(2000);
+      final previousContent = await epubPlayerKey.currentState!.previousContent(
+        2000,
+      );
       final prompt = generatePromptSummaryThePreviousContent(previousContent);
       SmartDialog.show(
         builder: (context) => AlertDialog(
           title: Text(L10n.of(context).readingPageSummaryPreviousContent),
-          content: AiStream(
-            prompt: prompt,
-          ),
+          content: AiStream(prompt: prompt),
         ),
         onDismiss: () {
           cancelActiveAiRequest();
@@ -512,6 +746,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
           child: AiChatStream(
             key: aiChatKey,
             initialMessage: null,
+            selectedText: _aiSelectedText,
             sendImmediate: false,
             quickPromptChips: _getAiQuickPromptChips(),
             trailing: _buildAiChatTrailing(context),
@@ -539,21 +774,43 @@ class ReadingPageState extends ConsumerState<ReadingPage>
         prompt: generatePromptMindmap().buildString(),
       ),
       // User custom prompts (enabled only)
-      ...Prefs()
-          .userPrompts
-          .where((p) => p.enabled)
-          .map((userPrompt) => AiQuickPromptChip(
-                icon: Icons.person_outline,
-                label: userPrompt.name,
-                prompt: userPrompt.content,
-              )),
+      ...Prefs().userPrompts.where((p) => p.enabled).map(
+            (userPrompt) => AiQuickPromptChip(
+              icon: Icons.person_outline,
+              label: userPrompt.name,
+              prompt: userPrompt.content,
+            ),
+          ),
     ];
   }
 
   Future<void> showAiChat({
     String? content,
+    String? selectedText,
     bool sendImmediate = false,
   }) async {
+    _aiSelectedText = selectedText;
+    _selectionCfi = ref.read(currentReadingProvider).cfi;
+    _assistantDraft = sendImmediate ? null : content;
+    setState(() {
+      _floatingChatVisible = true;
+      _assistantRevision++;
+    });
+    showOrHideAppBarAndBottomBar(false);
+    if (sendImmediate && content?.trim().isNotEmpty == true) {
+      _assistant.pause();
+      try {
+        await _assistantTurn.send(content!);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> showAiChatHistory({
+    String? content,
+    String? selectedText,
+    bool sendImmediate = false,
+  }) async {
+    _assistant.pause();
     List<AiQuickPromptChip> quickPrompts = _getAiQuickPromptChips();
 
     // Determine display mode
@@ -579,26 +836,28 @@ class ReadingPageState extends ConsumerState<ReadingPage>
 
     if (shouldShowAsPopup) {
       showModalBottomSheet(
-          context: navigatorKey.currentContext!,
-          isScrollControlled: true,
-          showDragHandle: false,
-          clipBehavior: Clip.hardEdge,
-          builder: (context) => PointerInterceptor(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(context).size.height * 0.8,
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 8.0),
-                    child: AiChatStream(
-                      key: aiChatKey,
-                      initialMessage: content,
-                      sendImmediate: sendImmediate,
-                      quickPromptChips: quickPrompts,
-                    ),
-                  ),
-                ),
-              ));
+        context: navigatorKey.currentContext!,
+        isScrollControlled: true,
+        showDragHandle: false,
+        clipBehavior: Clip.hardEdge,
+        builder: (context) => PointerInterceptor(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.8,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: AiChatStream(
+                key: aiChatKey,
+                initialMessage: content,
+                selectedText: selectedText,
+                sendImmediate: sendImmediate,
+                quickPromptChips: quickPrompts,
+              ),
+            ),
+          ),
+        ),
+      );
     } else {
       setState(() {
         final maxWidth = _aiChatMaxWidth(navigatorKey.currentContext!);
@@ -612,6 +871,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
               child: AiChatStream(
                 key: aiChatKey,
                 initialMessage: content,
+                selectedText: selectedText,
                 sendImmediate: sendImmediate,
                 quickPromptChips: quickPrompts,
                 trailing: _buildAiChatTrailing(navigatorKey.currentContext!),
@@ -633,34 +893,13 @@ class ReadingPageState extends ConsumerState<ReadingPage>
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(currentReadingProvider, (_, __) => _assistantContextChanged());
+    ref.listen(aiChatProvider, (_, __) => _assistantContextChanged());
+    ref.listen(aiProvidersProvider, (_, __) => _assistantContextChanged());
     var aiButton = IconButton(
       tooltip: L10n.of(context).aiChat,
       icon: const Icon(Icons.auto_awesome),
       onPressed: () async {
-        // Determine if should show as split based on display mode
-        final displayMode = Prefs().aiChatDisplayMode;
-        final screenWidth = MediaQuery.of(context).size.width;
-
-        bool shouldShowAsSplit = false;
-        switch (displayMode) {
-          case AiChatDisplayMode.adaptive:
-            shouldShowAsSplit = screenWidth >= 600;
-            break;
-          case AiChatDisplayMode.split:
-            shouldShowAsSplit = true;
-            break;
-          case AiChatDisplayMode.popup:
-            shouldShowAsSplit = false;
-            break;
-        }
-
-        if (shouldShowAsSplit && _aiChat != null) {
-          setState(() {
-            _aiChat = null;
-          });
-          return;
-        }
-
         showOrHideAppBarAndBottomBar(false);
         showAiChat();
       },
@@ -672,15 +911,14 @@ class ReadingPageState extends ConsumerState<ReadingPage>
           children: [
             Positioned.fill(
               child: GestureDetector(
-                  onTap: () {
-                    showOrHideAppBarAndBottomBar(false);
-                  },
-                  behavior: HitTestBehavior.opaque,
-                  onVerticalDragUpdate: (details) {},
-                  onVerticalDragEnd: (details) {},
-                  child: Container(
-                    color: Colors.black.withAlpha(30),
-                  )),
+                onTap: () {
+                  showOrHideAppBarAndBottomBar(false);
+                },
+                behavior: HitTestBehavior.opaque,
+                onVerticalDragUpdate: (details) {},
+                onVerticalDragEnd: (details) {},
+                child: Container(color: Colors.black.withAlpha(30)),
+              ),
             ),
             Column(
               children: [
@@ -705,30 +943,34 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                           var len = content?.length ?? 0;
                           if (len > 0) {
                             await Clipboard.setData(
-                                ClipboardData(text: content!));
+                              ClipboardData(text: content!),
+                            );
                           }
-                          AnxToast.show(L10n.of(context)
-                              .readingPageCopiedCharacters(len));
+                          AnxToast.show(
+                            L10n.of(context).readingPageCopiedCharacters(len),
+                          );
                         } catch (e) {
                           AnxToast.show(
-                              L10n.of(context).readingPageErrorCopyingContent);
+                            L10n.of(context).readingPageErrorCopyingContent,
+                          );
                         }
                       },
                     ),
                     IconButton(
-                        tooltip: L10n.of(context).readingPageBookmark,
-                        onPressed: () {
-                          if (bookmarkExists) {
-                            epubPlayerKey.currentState!.removeAnnotation(
-                              epubPlayerKey.currentState!.bookmarkCfi,
-                            );
-                          } else {
-                            epubPlayerKey.currentState!.addBookmarkHere();
-                          }
-                        },
-                        icon: bookmarkExists
-                            ? const Icon(Icons.bookmark)
-                            : const Icon(Icons.bookmark_border)),
+                      tooltip: L10n.of(context).readingPageBookmark,
+                      onPressed: () {
+                        if (bookmarkExists) {
+                          epubPlayerKey.currentState!.removeAnnotation(
+                            epubPlayerKey.currentState!.bookmarkCfi,
+                          );
+                        } else {
+                          epubPlayerKey.currentState!.addBookmarkHere();
+                        }
+                      },
+                      icon: bookmarkExists
+                          ? const Icon(Icons.bookmark)
+                          : const Icon(Icons.bookmark_border),
+                    ),
                     IconButton(
                       tooltip: L10n.of(context).readingPageBookDetails,
                       icon: const Icon(EvaIcons.more_vertical),
@@ -758,10 +1000,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                if (hasContent)
-                                  Expanded(
-                                    child: _currentPage,
-                                  ),
+                                if (hasContent) Expanded(child: _currentPage),
                                 Row(
                                   mainAxisAlignment:
                                       MainAxisAlignment.spaceAround,
@@ -820,10 +1059,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
               resizeToAvoidBottomInset: false,
               drawer: PointerInterceptor(
                 child: Drawer(
-                  width: math.min(
-                    MediaQuery.of(context).size.width * 0.8,
-                    420,
-                  ),
+                  width: math.min(MediaQuery.of(context).size.width * 0.8, 420),
                   child: SafeArea(
                     child: TocWidget(
                       epubPlayerKey: epubPlayerKey,
@@ -871,10 +1107,9 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                                 if (_isResizingAiChat)
                                   SizedBox.expand(
                                     child: Container(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .surface
-                                          .withAlpha(1),
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.surface.withAlpha(1),
                                     ),
                                   ),
                               ],
@@ -916,7 +1151,8 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                                   AiPanelPositionEnum.bottom
                               ? (details) {
                                   _beginAiChatResizeVertical(
-                                      details.globalPosition.dy);
+                                    details.globalPosition.dy,
+                                  );
                                 }
                               : null,
                           onVerticalDragUpdate: Prefs().aiPanelPosition ==
@@ -947,14 +1183,8 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                                 : SystemMouseCursors.resizeRow,
                             child: Prefs().aiPanelPosition ==
                                     AiPanelPositionEnum.right
-                                ? VerticalDivider(
-                                    width: 2,
-                                    thickness: 1,
-                                  )
-                                : Divider(
-                                    height: 2,
-                                    thickness: 1,
-                                  ),
+                                ? VerticalDivider(width: 2, thickness: 1)
+                                : Divider(height: 2, thickness: 1),
                           ),
                         ),
                       if (_aiChat != null)
@@ -969,19 +1199,34 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                               ? _aiChatHeight
                               : null,
                           child: _aiChat,
-                        )
+                        ),
                     ],
                   ),
                   controller,
+                  if (_floatingChatVisible)
+                    Positioned.fill(
+                      child: FloatingBookAssistant(
+                        session: _assistant,
+                        turn: _assistantTurn,
+                        scope: _assistantScope,
+                        startVoice: _startBookVoice,
+                        close: _closeBookAssistant,
+                        hints: _showReadingHints,
+                        illustrations: _showIllustrations,
+                        history: () {
+                          _assistant.pause();
+                          setState(() => _floatingChatVisible = false);
+                          showAiChatHistory();
+                        },
+                        draft: _assistantDraft,
+                        revision: _assistantRevision,
+                      ),
+                    ),
                   // TTS floating action button: always in the tree when toolbar
                   // is hidden; TtsFab handles its own show/hide internally so
                   // its State (expanded flag) is never destroyed mid-session.
                   if (bottomBarOffstage)
-                    const Positioned(
-                      right: 16,
-                      bottom: 24,
-                      child: TtsFab(),
-                    ),
+                    const Positioned(right: 16, bottom: 24, child: TtsFab()),
                 ],
               ),
             ),

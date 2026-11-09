@@ -1,3 +1,9 @@
+import 'dart:io';
+import 'package:anx_reader/service/voice/reader_voice.dart';
+import 'package:anx_reader/widgets/ai/reader_voice_toolbar.dart';
+import 'package:anx_reader/service/chatgpt/chatgpt_plan.dart';
+import 'package:anx_reader/widgets/settings/chatgpt_plan_card.dart';
+import 'package:anx_reader/providers/current_reading.dart';
 import 'dart:async';
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
@@ -35,12 +41,14 @@ class AiChatStream extends ConsumerStatefulWidget {
   const AiChatStream({
     super.key,
     this.initialMessage,
+    this.selectedText,
     this.sendImmediate = false,
     this.quickPromptChips = const [],
     this.trailing,
   });
 
   final String? initialMessage;
+  final String? selectedText;
   final bool sendImmediate;
   final List<AiQuickPromptChip> quickPromptChips;
   final List<Widget>? trailing;
@@ -57,6 +65,44 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
   StreamSubscription<List<ChatMessage>>? _messageSubscription;
   final ScrollController _scrollController = ScrollController();
   bool _isStreaming = false;
+  late final ReaderVoiceController _voice;
+  String _voiceScope() {
+    final reading = ref.read(currentReadingProvider);
+    final plan = ChatGptPlan.instance;
+    return '${reading.isReading}:${reading.book?.id}|${plan.enabled ? plan.active?.id : Prefs().selectedAiService}|${ref.read(aiChatProvider.notifier).currentSessionId}|${widget.selectedText ?? ""}';
+  }
+
+  Map<String, String> _assistantVoiceContext() {
+    final reading = ref.read(currentReadingProvider);
+    return {
+      'title': reading.book?.title ?? '',
+      'chapter': reading.chapterTitle ?? '',
+      'selection': widget.selectedText ?? '',
+      'question': inputController.text,
+    };
+  }
+
+  void _insertVoiceDraft(String text) {
+    if (!mounted) return;
+    final old = inputController.text;
+    final caret = inputController.selection.isValid
+        ? inputController.selection.end.clamp(0, old.length)
+        : old.length;
+    final next = insertVoiceDraft(old, caret, text);
+    inputController.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(
+        offset: next.length - (old.length - caret),
+      ),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant AiChatStream oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _voice.contextChanged();
+  }
+
   late List<String> _suggestedPrompts;
   late List<String> _starterPrompts;
   double _fontSize = 14.0;
@@ -86,6 +132,8 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     ];
   }
 
+  bool _chatGptReady = false;
+
   @override
   void initState() {
     super.initState();
@@ -105,15 +153,52 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     ];
     _fontSize = Prefs().aiChatFontSize;
     inputController.text = widget.initialMessage ?? '';
+    _voice = ReaderVoiceController(
+      currentScope: _voiceScope,
+      onDraft: _insertVoiceDraft,
+    );
     _suggestedPrompts = _pickSuggestedPrompts();
-    if (widget.sendImmediate) {
-      _sendMessage();
-    }
+    ChatGptPlan.instance.addListener(_chatGptChanged);
+    Future<void>(() async {
+      try {
+        await ref.read(aiChatProvider.notifier).prepareBookChat();
+        if (mounted && widget.sendImmediate) _sendMessage();
+      } catch (_) {
+        /* The settings card shows protected-storage errors. */
+      }
+      if (mounted)
+        setState(() {
+          _chatGptReady = true;
+        });
+    });
     _scrollToBottom();
+  }
+
+  void _chatGptChanged() async {
+    if (!mounted) return;
+    _voice.contextChanged();
+    _messageSubscription?.cancel();
+    _messageSubscription = null;
+    _messageController?.close();
+    _messageController = null;
+    setState(() {
+      _chatGptReady = false;
+      _messageStream = null;
+      _isStreaming = false;
+    });
+    try {
+      await ref.read(aiChatProvider.notifier).prepareBookChat();
+    } catch (_) {}
+    if (mounted)
+      setState(() {
+        _chatGptReady = true;
+      });
   }
 
   @override
   void dispose() {
+    _voice.dispose();
+    ChatGptPlan.instance.removeListener(_chatGptChanged);
     inputController.dispose();
     _messageSubscription?.cancel();
     _messageController?.close();
@@ -141,8 +226,18 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     return '';
   }
 
-  void _onProviderSelected(String providerId) {
+  void _onProviderSelected(String providerId) async {
+    if (ref.read(aiChatProvider.notifier).isStreaming) return;
     if (_isStreaming) return;
+    if (providerId == ChatGptPlan.providerId) {
+      try {
+        await ChatGptPlan.instance.setEnabled(true);
+      } catch (_) {
+        if (mounted) await showChatGptPlanSettings(context);
+      }
+      return;
+    }
+    ChatGptPlan.instance.setEnabled(false);
     ref.read(aiProvidersProvider.notifier).setSelectedProvider(providerId);
   }
 
@@ -201,9 +296,8 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
                 );
               },
               loading: () => const Center(child: CircularProgressIndicator()),
-              error: (error, stack) => Center(
-                child: Text(L10n.of(context).failedToLoadHistoryTip),
-              ),
+              error: (error, stack) =>
+                  Center(child: Text(L10n.of(context).failedToLoadHistoryTip)),
             ),
           ),
         ],
@@ -214,8 +308,9 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
   Widget _buildHistoryTile(BuildContext context, AiChatHistoryEntry entry) {
     final allProviders = ref.watch(aiProvidersProvider);
     final provider = _providerById(allProviders, entry.serviceId);
-    final statusColor =
-        entry.completed ? Colors.green : Theme.of(context).colorScheme.tertiary;
+    final statusColor = entry.completed
+        ? Colors.green
+        : Theme.of(context).colorScheme.tertiary;
     final title = _deriveTitle(entry);
     final subtitle = _buildHistorySubtitle(provider, entry);
 
@@ -228,11 +323,7 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
+            Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
             Row(
               children: [
                 Column(
@@ -257,7 +348,8 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
                   children: [
                     Icon(Icons.circle, size: 10, color: statusColor),
                     DeleteConfirm(
-                        delete: () => _confirmDeleteHistory(context, entry)),
+                      delete: () => _confirmDeleteHistory(context, entry),
+                    ),
                   ],
                 ),
               ],
@@ -327,6 +419,7 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     }
     _messageController = null;
 
+    unawaited(_voice.cancel());
     ref.read(aiChatProvider.notifier).loadHistoryEntry(entry);
 
     setState(() {
@@ -346,6 +439,7 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
 
     final currentSessionId = ref.read(aiChatProvider.notifier).currentSessionId;
     if (currentSessionId == entry.id) {
+      unawaited(_voice.cancel());
       ref.read(aiChatProvider.notifier).clear();
       setState(() {
         _messageStream = null;
@@ -355,6 +449,7 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
   }
 
   Future<void> _confirmClearHistory(BuildContext context) async {
+    unawaited(_voice.cancel());
     await ref.read(aiHistoryProvider.notifier).clear();
     ref.read(aiChatProvider.notifier).clear();
     setState(() {
@@ -362,12 +457,16 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     });
   }
 
+  Future<void> cancelVoiceInput() => _voice.cancel();
+
   void _sendMessage({bool isRegenerate = false}) {
+    if (ref.read(aiChatProvider.notifier).isStreaming) return;
     if (_isStreaming) {
       return;
     }
 
     if (inputController.text.trim().isEmpty) return;
+    unawaited(_voice.cancel());
     final message = inputController.text.trim();
     inputController.clear();
 
@@ -375,11 +474,9 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     _messageController?.close();
 
     final controller = StreamController<List<ChatMessage>>();
-    final stream = ref.read(aiChatProvider.notifier).sendMessageStream(
-          message,
-          ref,
-          isRegenerate,
-        );
+    final stream = ref
+        .read(aiChatProvider.notifier)
+        .sendMessageStream(message, ref, isRegenerate);
 
     setState(() {
       _messageController = controller;
@@ -422,9 +519,15 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     _sendMessage();
   }
 
-  void _clearMessage() {
+  void _clearMessage() async {
+    unawaited(_voice.cancel());
     if (_isStreaming) {
       return;
+    }
+    if (ChatGptPlan.instance.enabled) {
+      final id = ref.read(aiChatProvider.notifier).currentSessionId;
+      if (id != null) await ref.read(aiHistoryProvider.notifier).remove(id);
+      if (!mounted) return;
     }
     _messageSubscription?.cancel();
     _messageSubscription = null;
@@ -450,7 +553,8 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
       final message = messages[i];
       if (message is HumanChatMessage) {
         final history = messages.take(i).toList(growable: false);
-        ref.read(aiChatProvider.notifier).restore(history);
+        final notifier = ref.read(aiChatProvider.notifier);
+        notifier.restore(history, sessionId: notifier.currentSessionId);
         setState(() {
           inputController.text = message.contentAsString;
           _sendMessage(isRegenerate: true);
@@ -555,6 +659,14 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(currentReadingProvider, (previous, next) {
+      if (previous?.book?.id != next.book?.id ||
+          previous?.isReading != next.isReading) {
+        _chatGptChanged();
+      }
+    });
+    if (!_chatGptReady) return const Center(child: CircularProgressIndicator());
+    final plan = ChatGptPlan.instance;
     final quickPrompts = _getQuickPrompts(context);
     final allProviders = ref.watch(aiProvidersProvider);
     final enabledProviders = allProviders.where((p) => p.enabled).toList();
@@ -565,29 +677,37 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
       enabled: !_isStreaming,
       onSelected: _onProviderSelected,
       itemBuilder: (context) {
-        return enabledProviders.map((provider) {
-          final isSelected = provider.id == selectedId;
-          final label = _modelLabel(provider);
-          final logo = _providerLogo(provider);
-          return PopupMenuItem<String>(
-            value: provider.id,
-            child: Row(
-              children: [
-                if (logo != null) logo else const SizedBox(width: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    label.isNotEmpty
-                        ? '${provider.title} · $label'
-                        : provider.title,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (isSelected) const Icon(Icons.check, size: 16),
-              ],
+        return <PopupMenuEntry<String>>[
+          PopupMenuItem<String>(
+            value: ChatGptPlan.providerId,
+            child: Text(
+              'ChatGPT · ${plan.active?.model ?? "my subscription"}${plan.enabled ? " ✓" : ""}',
             ),
-          );
-        }).toList(growable: false);
+          ),
+          ...enabledProviders.map((provider) {
+            final isSelected = provider.id == selectedId;
+            final label = _modelLabel(provider);
+            final logo = _providerLogo(provider);
+            return PopupMenuItem<String>(
+              value: provider.id,
+              child: Row(
+                children: [
+                  if (logo != null) logo else const SizedBox(width: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      label.isNotEmpty
+                          ? '${provider.title} · $label'
+                          : provider.title,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (isSelected) const Icon(Icons.check, size: 16),
+                ],
+              ),
+            );
+          }),
+        ];
       },
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -597,7 +717,9 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
           const SizedBox(width: 6),
           Flexible(
             child: Text(
-              currentProvider != null
+              plan.enabled
+                  ? 'ChatGPT · ${plan.active?.model ?? "my subscription"}'
+                  : currentProvider != null
                   ? () {
                       final label = _modelLabel(currentProvider);
                       return label.isNotEmpty
@@ -643,6 +765,12 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
               ],
             ),
             SizedBox(height: 4),
+            if (Platform.isAndroid)
+              ReaderVoiceToolbar(
+                controller: _voice,
+                assistantContext: _assistantVoiceContext,
+                disabled: _isStreaming,
+              ),
             TextField(
               controller: inputController,
               decoration: InputDecoration(
@@ -663,7 +791,12 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
                   child: Row(
                     children: [
                       Flexible(child: aiService),
-                      if (currentProvider != null)
+                      if (plan.enabled)
+                        IconButton(
+                          icon: const Icon(Icons.tune, size: 16),
+                          onPressed: () => showChatGptPlanSettings(context),
+                        ),
+                      if (!plan.enabled && currentProvider != null)
                         IconButton(
                           icon: const Icon(Icons.tune, size: 16),
                           padding: EdgeInsets.zero,
@@ -732,10 +865,7 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
             height: MediaQuery.of(context).size.height * 0.3,
             child: SingleChildScrollView(
               // scrollDirection: Axis.horizontal,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: chips,
-              ),
+              child: Column(mainAxisSize: MainAxisSize.min, children: chips),
             ),
           ),
         );
@@ -801,10 +931,9 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
           if (widget.trailing != null) ...widget.trailing!,
         ],
       ),
-      drawer: Drawer(
-        child: _buildHistoryDrawer(context),
-      ),
-      body: EnvVar.isAppStore &&
+      drawer: Drawer(child: _buildHistoryDrawer(context)),
+      body:
+          EnvVar.isAppStore &&
               Prefs().shouldShowHint(HintKey.aiDataSharingConsent)
           ? _buildDataSharingConsent(context)
           : Column(
@@ -814,6 +943,12 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
                       ? StreamBuilder<List<ChatMessage>>(
                           stream: _messageStream,
                           builder: (context, snapshot) {
+                            if (snapshot.hasError) {
+                              return SingleChildScrollView(
+                                padding: const EdgeInsets.all(16),
+                                child: Text(snapshot.error.toString()),
+                              );
+                            }
                             if (!snapshot.hasData) {
                               return Skeletonizer.zone(child: Bone.multiText());
                             }
@@ -826,19 +961,21 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
                             return _buildMessageList(messages);
                           },
                         )
-                      : ref.watch(aiChatProvider).when(
-                            data: (messages) {
-                              if (messages.isEmpty) {
-                                return buildEmptyState();
-                              }
+                      : ref
+                            .watch(aiChatProvider)
+                            .when(
+                              data: (messages) {
+                                if (messages.isEmpty) {
+                                  return buildEmptyState();
+                                }
 
-                              return _buildMessageList(messages);
-                            },
-                            loading: () =>
-                                Skeletonizer.zone(child: Bone.multiText()),
-                            error: (error, stack) =>
-                                Center(child: Text('error: $error')),
-                          ),
+                                return _buildMessageList(messages);
+                              },
+                              loading: () =>
+                                  Skeletonizer.zone(child: Bone.multiText()),
+                              error: (error, stack) =>
+                                  Center(child: Text('error: $error')),
+                            ),
                 ),
                 inputBox,
               ],
@@ -913,11 +1050,7 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
     );
   }
 
-  Widget _buildMessageItem(
-    ChatMessage message,
-    int index,
-    bool isStreaming,
-  ) {
+  Widget _buildMessageItem(ChatMessage message, int index, bool isStreaming) {
     final isUser = message is HumanChatMessage;
     final content = chatMessageDisplayContent(message);
     final parsed = parseReasoningContent(content);
@@ -931,8 +1064,9 @@ class AiChatStreamState extends ConsumerState<AiChatStream> {
         right: isUser ? 0 : 8.0,
       ),
       child: Row(
-        mainAxisAlignment:
-            isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(width: 8),
@@ -1219,10 +1353,9 @@ class _CollapsibleTextState extends State<_CollapsibleText> {
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
                       colors: [
-                        Theme.of(context)
-                            .colorScheme
-                            .surfaceContainer
-                            .withValues(alpha: 0),
+                        Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainer.withValues(alpha: 0),
                         Theme.of(context).colorScheme.surfaceContainer,
                       ],
                     ),
@@ -1237,9 +1370,11 @@ class _CollapsibleTextState extends State<_CollapsibleText> {
               _isExpanded = !_isExpanded;
             });
           },
-          child: Text(_isExpanded
-              ? L10n.of(context).aiHintCollapse
-              : L10n.of(context).aiHintExpand),
+          child: Text(
+            _isExpanded
+                ? L10n.of(context).aiHintCollapse
+                : L10n.of(context).aiHintExpand,
+          ),
         ),
       ],
     );

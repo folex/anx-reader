@@ -347,6 +347,7 @@ class ExcerptMenuState extends State<ExcerptMenu> {
                 if (key != null) {
                   key.showAiChat(
                     content: widget.annoContent,
+                    selectedText: widget.annoContent,
                     sendImmediate: false,
                   );
                   key.aiChatKey.currentState?.inputController.text =

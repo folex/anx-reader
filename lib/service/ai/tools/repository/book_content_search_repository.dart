@@ -19,15 +19,38 @@ class BookContentSearchRepository {
     BooksRepository? booksRepository,
     Duration? searchTimeout,
     Duration? sessionIdleTimeout,
-  })  : _booksRepository = booksRepository ?? const BooksRepository(),
-        _searchTimeout = searchTimeout ?? const Duration(seconds: 15),
-        _sessionIdleTimeout = sessionIdleTimeout ?? const Duration(minutes: 3);
+  }) : _booksRepository = booksRepository ?? const BooksRepository(),
+       _searchTimeout = searchTimeout ?? const Duration(seconds: 15),
+       _sessionIdleTimeout = sessionIdleTimeout ?? const Duration(minutes: 3) {
+    _instances.add(WeakReference(this));
+  }
+
+  static final _instances = <WeakReference<BookContentSearchRepository>>{};
+
+  static Future<void> invalidateBook(int bookId) async {
+    for (final weak in _instances.toList()) {
+      final repository = weak.target;
+      if (repository == null) {
+        _instances.remove(weak);
+        continue;
+      }
+      final session = repository._sessions.remove(bookId);
+      if (session != null) await session.dispose();
+    }
+  }
 
   final BooksRepository _booksRepository;
   final Duration _searchTimeout;
   final Duration _sessionIdleTimeout;
 
   final Map<int, _HeadlessSearchSession> _sessions = {};
+
+  /// Library scans release each reader immediately instead of keeping one
+  /// headless WebView per book alive for the idle timeout.
+  Future<void> releaseBook(int bookId) async {
+    final session = _sessions.remove(bookId);
+    if (session != null) await session.dispose();
+  }
 
   Future<Map<String, dynamic>> search(BookContentSearchInput input) async {
     final keyword = input.keyword.trim();
@@ -37,7 +60,8 @@ class BookContentSearchRepository {
 
     final book = await _resolveBook(input.bookId);
     AnxLog.info(
-        'BookContentSearchRepository: Starting search for book=${book.id}, keyword="$keyword"');
+      'BookContentSearchRepository: Starting search for book=${book.id}, keyword="$keyword"',
+    );
 
     final session = await _getOrCreateSession(book);
 
@@ -67,7 +91,8 @@ class BookContentSearchRepository {
       };
     } on Object catch (error, stackTrace) {
       AnxLog.severe(
-          'BookContentSearchRepository: Search failed for book=${book.id}, keyword="$keyword": $error\n$stackTrace');
+        'BookContentSearchRepository: Search failed for book=${book.id}, keyword="$keyword": $error\n$stackTrace',
+      );
       rethrow;
     } finally {
       if (session.isActive) {
@@ -115,10 +140,7 @@ class BookContentSearchRepository {
 }
 
 class _HeadlessSearchSession {
-  _HeadlessSearchSession({
-    required this.book,
-    required this.idleCallback,
-  });
+  _HeadlessSearchSession({required this.book, required this.idleCallback});
 
   final Book book;
   final VoidCallback idleCallback;
@@ -206,7 +228,8 @@ class _HeadlessSearchSession {
         if (!loadCompleter.isCompleted) {
           loadCompleter.completeError(
             Exception(
-                'HTTP error while loading reader: [$statusCode] $description'),
+              'HTTP error while loading reader: [$statusCode] $description',
+            ),
           );
         }
       },
@@ -214,13 +237,15 @@ class _HeadlessSearchSession {
 
     _webView = headless;
     await headless.run();
-    await loadCompleter.future.timeout(const Duration(seconds: 15),
-        onTimeout: () async {
-      await headless.dispose();
-      _webView = null;
-      _controller = null;
-      throw TimeoutException('Timed out loading reader for book ${book.id}');
-    });
+    await loadCompleter.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () async {
+        await headless.dispose();
+        _webView = null;
+        _controller = null;
+        throw TimeoutException('Timed out loading reader for book ${book.id}');
+      },
+    );
 
     final readyCompleter = _readyCompleter;
     if (readyCompleter != null && !readyCompleter.isCompleted) {
@@ -283,14 +308,19 @@ class _HeadlessSearchSession {
       }
 
       try {
-        final response =
-            await search.completer.future.timeout(timeout, onTimeout: () {
-          if (!search.completer.isCompleted) {
-            search.completer.completeError(TimeoutException(
-                'Search handler timeout after ${timeout.inSeconds} seconds'));
-          }
-          return search.completer.future;
-        });
+        final response = await search.completer.future.timeout(
+          timeout,
+          onTimeout: () {
+            if (!search.completer.isCompleted) {
+              search.completer.completeError(
+                TimeoutException(
+                  'Search handler timeout after ${timeout.inSeconds} seconds',
+                ),
+              );
+            }
+            return search.completer.future;
+          },
+        );
         stopwatch.stop();
         return response.copyWith(duration: stopwatch.elapsed);
       } finally {
@@ -324,7 +354,8 @@ class _HeadlessSearchSession {
         await webView.dispose();
       } catch (error, stackTrace) {
         AnxLog.warning(
-            'HeadlessSearchSession(${book.id}): Failed to dispose webview: $error\n$stackTrace');
+          'HeadlessSearchSession(${book.id}): Failed to dispose webview: $error\n$stackTrace',
+        );
       }
     }
   }
@@ -387,13 +418,9 @@ class _HeadlessSearchSession {
 
   String _buildBookUrl() {
     final encodedPath = Uri.encodeComponent(book.fileFullPath);
-    final url = 'http://127.0.0.1:${Server().port}/book/$encodedPath';
+    final url = '${Server().baseUrl}/book/$encodedPath';
     final initialCfi = book.lastReadPosition;
-    return generateUrl(
-      url,
-      initialCfi,
-      importing: false,
-    );
+    return generateUrl(url, initialCfi, importing: false);
   }
 }
 
@@ -416,11 +443,13 @@ class _ActiveSearch {
       return;
     }
     stopwatch.stop();
-    completer.complete(_SearchResponse(
-      results: List<_SearchResult>.from(results),
-      completed: completed,
-      duration: stopwatch.elapsed,
-    ));
+    completer.complete(
+      _SearchResponse(
+        results: List<_SearchResult>.from(results),
+        completed: completed,
+        duration: stopwatch.elapsed,
+      ),
+    );
   }
 }
 
@@ -488,12 +517,7 @@ class _SearchMatch {
   final String post;
 
   Map<String, dynamic> toMap() {
-    return {
-      'cfi': cfi,
-      'pre': pre,
-      'match': match,
-      'post': post,
-    };
+    return {'cfi': cfi, 'pre': pre, 'match': match, 'post': post};
   }
 
   static _SearchMatch fromJson(
@@ -506,12 +530,7 @@ class _SearchMatch {
     final match = _sanitizeSnippet(excerpt['match'], maxCharacters);
     final post = _sanitizeSnippet(excerpt['post'], maxCharacters);
 
-    return _SearchMatch(
-      cfi: cfi,
-      pre: pre,
-      match: match,
-      post: post,
-    );
+    return _SearchMatch(cfi: cfi, pre: pre, match: match, post: post);
   }
 
   static String _sanitizeSnippet(dynamic value, int? maxCharacters) {

@@ -1,3 +1,4 @@
+import 'package:anx_reader/models/footnote_appearance.dart';
 import 'dart:convert';
 import 'dart:core';
 
@@ -207,6 +208,14 @@ class Prefs extends ChangeNotifier {
 
   Future<void> saveThemeModeToPrefs(String themeMode) async {
     await prefs.setString('themeMode', themeMode);
+    notifyListeners();
+  }
+
+  FootnoteAppearance get footnoteAppearance =>
+      FootnoteAppearance.fromJson(prefs.getString('footnoteAppearance'));
+
+  Future<void> saveFootnoteAppearance(FootnoteAppearance appearance) async {
+    await prefs.setString('footnoteAppearance', appearance.toJson());
     notifyListeners();
   }
 
@@ -1003,6 +1012,13 @@ class Prefs extends ChangeNotifier {
     return prefs.getDouble('aiChatFontSize') ?? 14.0;
   }
 
+  bool get readerBrightnessGesture =>
+      prefs.getBool('readerBrightnessGesture') ?? true;
+
+  set readerBrightnessGesture(bool enabled) {
+    prefs.setBool('readerBrightnessGesture', enabled);
+  }
+
   set volumeKeyTurnPage(bool status) {
     prefs.setBool('volumeKeyTurnPage', status);
     notifyListeners();
@@ -1482,7 +1498,7 @@ class Prefs extends ChangeNotifier {
   }
 
   bool get enableJsForEpub {
-    return prefs.getBool('enableJsForEpub') ?? false;
+    return prefs.getBool('enableJsForEpub') ?? true;
   }
 
   set enableJsForEpub(bool enable) {

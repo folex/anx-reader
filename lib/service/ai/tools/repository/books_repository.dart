@@ -24,6 +24,9 @@ class BookSearchResult {
 class BooksRepository {
   const BooksRepository();
 
+  Future<List<Book>> listAvailableBooks() async =>
+      (await bookDao.selectBooks()).where((book) => !book.isDeleted).toList();
+
   Future<Map<int, Book>> fetchByIds(Iterable<int> ids) async {
     final uniqueIds = ids.where((id) => id > 0).toSet().toList();
     if (uniqueIds.isEmpty) {

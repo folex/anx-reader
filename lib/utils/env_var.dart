@@ -18,8 +18,8 @@ class EnvVar {
 
   static bool get showIapPlaceHolder => isOhosStore;
 
-  static bool get enableCheckUpdate =>
-      !isStoreBuild && !isFdroid && !isOhosStore;
+  // Personal Android releases use our signed update channel.
+  static bool get enableCheckUpdate => Platform.isAndroid;
   static bool get enableDonation => !isStoreBuild && !isOhosStore;
   static bool get enableInAppPurchase => isStoreBuild;
 

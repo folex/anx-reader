@@ -493,6 +493,16 @@ const annotationLayerBuilderCSS = `
 }
 `
 
+const makeTextLayer = async (page, viewport) => {
+    const container = document.createElement('div')
+    container.classList.add('textLayer')
+    await pdfjsLib.renderTextLayer({
+        textContentSource: await page.getTextContent(),
+        container, viewport,
+    }).promise
+    return container
+}
+
 const renderPage = async (page, getImageBlob) => {
 
     const naturalPdfSize = page.getViewport({ scale: 1 })
@@ -520,12 +530,7 @@ const renderPage = async (page, getImageBlob) => {
     const blob = new Blob([str], { type: 'image/svg+xml' })
     */
 
-    const container = document.createElement('div')
-    container.classList.add('textLayer')
-    await pdfjsLib.renderTextLayer({
-        textContentSource: await page.getTextContent(),
-        container, viewport,
-    }).promise
+    const container = await makeTextLayer(page, viewport)
 
     const div = document.createElement('div')
     div.classList.add('annotationLayer')
@@ -540,6 +545,8 @@ const renderPage = async (page, getImageBlob) => {
     const src = URL.createObjectURL(blob)
     const url = URL.createObjectURL(new Blob([`
         <!DOCTYPE html>
+        <html data-anx-pdf-page="1"><head>
+        <meta name="viewport" content="width=${viewport.width},height=${viewport.height}">
         <meta charset="utf-8">
         <style>
         :root {
@@ -552,9 +559,9 @@ const renderPage = async (page, getImageBlob) => {
         ${textLayerBuilderCSS}
         ${annotationLayerBuilderCSS}
         </style>
-        <img src="${src}">
+        </head><body style="position:relative;width:${viewport.width}px;height:${viewport.height}px"><img width="${viewport.width}" height="${viewport.height}" src="${src}">
         ${container.outerHTML}
-        ${div.outerHTML}
+        ${div.outerHTML}</body></html>
     `], { type: 'text/html' }))
     return url
 }
@@ -567,9 +574,9 @@ const makeTOCItem = item => ({
 
 export const makePDF = async file => {
     const data = new Uint8Array(await file.arrayBuffer())
-    const pdf = await pdfjsLib.getDocument({ data }).promise
+    const pdf = await pdfjsLib.getDocument({ data, isEvalSupported: false }).promise
 
-    const book = { rendition: { layout: 'pre-paginated' } }
+    const book = { isPDF: true, rendition: { layout: 'pre-paginated' } }
 
     const info = (await pdf.getMetadata())?.info
     book.metadata = {
@@ -582,7 +589,17 @@ export const makePDF = async file => {
 
     const cache = new Map()
     book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
-        id: i,
+        id: `pdf:page:${i + 1}`,
+        createDocument: async () => {
+            const page = await pdf.getPage(i + 1)
+            const container = await makeTextLayer(page, page.getViewport({ scale: 1 }))
+            // Mirror the rendered body structure so search CFIs resolve in it,
+            // without rasterizing or retaining images of every searched page.
+            return new DOMParser().parseFromString(`<!DOCTYPE html>
+                <html><head></head><body><img>
+        ${container.outerHTML}
+        <div class="annotationLayer"></div></body></html>`, 'text/html')
+        },
         load: async () => {
             const cached = cache.get(i)
             if (cached) return cached
@@ -595,6 +612,8 @@ export const makePDF = async file => {
     book.sections[0].pageSpread = 'right'
     book.isExternal = uri => /^\w+:/i.test(uri)
     book.resolveHref = async href => {
+        const page = /^pdf:page:([1-9][0-9]*)$/.exec(href)
+        if (page) { const index = Number(page[1]) - 1; if (index < pdf.numPages) return { index }; throw new Error('PDF page out of range') }
         const parsed = JSON.parse(href)
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed
@@ -603,6 +622,7 @@ export const makePDF = async file => {
         return { index }
     }
     book.splitTOCHref = async href => {
+        if (/^pdf:page:/.test(href)) return [(await book.resolveHref(href)).index, null]
         const parsed = JSON.parse(href)
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed

@@ -1,3 +1,7 @@
+import 'reader_image_tool.dart';
+import 'library_content_search_tool.dart';
+import 'package:anx_reader/service/ai/tools/reader_context_tool.dart';
+import 'package:anx_reader/service/ai/tools/reader_edit_tool.dart';
 import 'package:anx_reader/l10n/generated/L10n.dart';
 import 'package:anx_reader/providers/current_reading.dart';
 import 'package:anx_reader/service/ai/tools/apply_book_tags_tool.dart';
@@ -24,9 +28,25 @@ import 'package:anx_reader/service/ai/tools/repository/tag_repository.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:langchain_core/tools.dart';
 
+const readerBookToolIds = [
+  ...readerEditToolIds,
+  ...readerContextToolIds,
+  ...readerImageToolIds
+];
+
+const libraryBookToolIds = [
+  'bookshelf_lookup',
+  'book_content_search',
+  'library_content_search',
+];
+
+const bookAssistantToolIds = [...readerBookToolIds, ...libraryBookToolIds];
+
 /// Context object shared by AI tools so builders don't need long constructors.
 class AiToolContext {
-  AiToolContext({required this.ref});
+  AiToolContext({required this.ref, this.editChapterHref});
+
+  final String? editChapterHref;
 
   final WidgetRef ref;
 
@@ -72,6 +92,7 @@ class AiToolRegistry {
     currentTimeToolDefinition,
     mindmapToolDefinition,
     bookContentSearchToolDefinition,
+    libraryContentSearchToolDefinition,
     bookshelfLookupToolDefinition,
     bookshelfOrganizeToolDefinition,
     notesSearchToolDefinition,
@@ -83,6 +104,12 @@ class AiToolRegistry {
     tagsListToolDefinition,
     booksTagsListToolDefinition,
     applyBookTagsToolDefinition,
+    addBookFootnoteToolDefinition,
+    addBookRubyToolDefinition,
+    addBookHighlightToolDefinition,
+    readerSelectionToolDefinition,
+    readerVisibleTextToolDefinition,
+    ...readerImageToolDefinitions,
   ];
 
   static final Map<String, AiToolDefinition> _definitionMap = {
@@ -108,10 +135,7 @@ class AiToolRegistry {
     return filtered;
   }
 
-  static List<Tool> buildTools(
-    AiToolContext context,
-    List<String> enabledIds,
-  ) {
+  static List<Tool> buildTools(AiToolContext context, List<String> enabledIds) {
     final enabled = enabledIds.toSet();
     return _definitions
         .where((def) => enabled.contains(def.id))

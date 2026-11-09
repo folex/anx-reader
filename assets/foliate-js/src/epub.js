@@ -778,6 +778,10 @@ class Loader {
             // TODO: srcset?
             const replace = async (el, attr) => el.setAttribute(attr,
                 await this.loadHref(el.getAttribute(attr), href, parents))
+            for (const image of doc.querySelectorAll('img[data-anx-image-original-src]')) {
+                for (const attr of ['data-anx-image-original-src', 'data-anx-image-base-src', 'data-anx-image-dark-src'])
+                    if (image.hasAttribute(attr)) await replace(image, attr)
+            }
             for (const el of doc.querySelectorAll('link[href]')) await replace(el, 'href')
             for (const el of doc.querySelectorAll('[src]')) await replace(el, 'src')
             for (const el of doc.querySelectorAll('[poster]')) await replace(el, 'poster')

@@ -117,6 +117,27 @@ class ReadingPageState extends ConsumerState<ReadingPage>
   }
 
   Future<void> _prepareAssistantConversation() => prepareBookAssistantIdentity(
+        // Loading the saved account is not an account switch. Still reject a
+        // real book/provider/account change while secure storage is loading.
+        initializationIdentity: () {
+          if (!mounted) return 'reader-disposed';
+          final reading = ref.read(currentReadingProvider);
+          final service = Prefs().selectedAiService;
+          final config = Prefs().getAiConfig(service);
+          final provider =
+              Object.hash(config['url'], config['api_key'], config['model']);
+          return '${reading.isReading}:${reading.book?.id}:$service:$provider:${ChatGptPlan.instance.requestRevision}';
+        },
+        initialize: () async {
+          final plan = ChatGptPlan.instance;
+          try {
+            await plan.initialize();
+          } catch (_) {
+            // As in prepareBookChat, a broken optional ChatGPT connection must
+            // not stop a separately configured AI provider.
+            if (plan.enabled) rethrow;
+          }
+        },
         identity: _assistantIdentity,
         prepare: () =>
             ref.read(aiChatProvider.notifier).ensureSessionForVoice(),

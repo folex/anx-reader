@@ -4,6 +4,48 @@ import 'package:anx_reader/service/voice/book_assistant_turn.dart';
 import 'package:anx_reader/service/voice/reader_assistant_context.dart';
 
 void main() {
+  test('first request accepts account restoration before capturing identity',
+      () async {
+    var account = 'not-loaded';
+    var prepared = false;
+    await prepareBookAssistantIdentity(
+      initializationIdentity: () => 'book:provider:revision0',
+      initialize: () async {
+        account = 'restored';
+      },
+      identity: () => 'book:$account',
+      prepare: () async {
+        prepared = true;
+      },
+    );
+    expect(account, 'restored');
+    expect(prepared, true);
+  });
+  test(
+      'book, provider or explicit account switch during initialization cancels',
+      () async {
+    for (final changed in [
+      'otherbook:provider:revision0',
+      'book:otherprovider:revision0',
+      'book:provider:revision1'
+    ]) {
+      var guard = 'book:provider:revision0';
+      var prepared = false;
+      await expectLater(
+          prepareBookAssistantIdentity(
+            initializationIdentity: () => guard,
+            initialize: () async {
+              guard = changed;
+            },
+            identity: () => 'restored-account',
+            prepare: () async {
+              prepared = true;
+            },
+          ),
+          throwsStateError);
+      expect(prepared, false);
+    }
+  });
   test('prepare cannot transfer old utterance to new book/account', () async {
     var identity = 'book:account';
     final ready = Completer<void>();

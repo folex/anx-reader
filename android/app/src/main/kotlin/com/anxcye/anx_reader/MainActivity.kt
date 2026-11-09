@@ -10,6 +10,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : AudioServiceActivity() {
+    private var readerExtensionBridge: ReaderExtensionBridge? = null
     private var readerAssistantTtsBridge: ReaderAssistantTtsBridge? = null
     private var readerVoiceBridge: ReaderVoiceBridge? = null
     private var readerBrightnessBridge: ReaderBrightnessBridge? = null
@@ -17,6 +18,7 @@ class MainActivity : AudioServiceActivity() {
     private var personalUpdateBridge: PersonalUpdateBridge? = null
 
     override fun onDestroy() {
+        readerExtensionBridge?.close()
         readerAssistantTtsBridge?.close()
         readerVoiceBridge?.close()
         readerBrightnessBridge?.close()
@@ -73,6 +75,7 @@ class MainActivity : AudioServiceActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        readerExtensionBridge = ReaderExtensionBridge(this, flutterEngine)
         personalUpdateBridge = PersonalUpdateBridge(this, flutterEngine)
         readerNetworkDiagnosticsBridge = ReaderNetworkDiagnosticsBridge(this, flutterEngine)
         ChatGptBridge(this, flutterEngine)

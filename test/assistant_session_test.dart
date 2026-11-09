@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:anx_reader/service/voice/assistant_session.dart';
 import 'package:anx_reader/service/voice/assistant_tts.dart';
 import 'package:anx_reader/service/voice/reader_voice.dart';
+import 'package:anx_reader/service/chatgpt/protocol.dart';
 
 class FakeNative implements ReaderVoiceNative, AssistantTtsNative {
   final controller = StreamController<Map<String, dynamic>>.broadcast(
@@ -180,6 +181,40 @@ void main() {
       expect(session.state, AssistantState.error);
       expect(speech.count('startAssistantListening'), starts);
     }
+  });
+  test('safe ChatGPT failure reaches the assistant instead of a generic error',
+      () async {
+    await session.start();
+    speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+    await drain();
+    answer.completeError(
+        const ChatGptError('Step limit reached. Saved changes are intact.'));
+    await drain();
+    expect(session.state, AssistantState.error);
+    expect(session.error, 'Step limit reached. Saved changes are intact.');
+    expect(tts.count('speak'), 0);
+  });
+  test('model timeout is distinguishable from other assistant failures',
+      () async {
+    await session.start();
+    speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+    await drain();
+    answer.completeError(TimeoutException('private transport details'));
+    await drain();
+    expect(session.state, AssistantState.error);
+    expect(session.error,
+        'The AI response timed out. Check the chat and saved changes before asking again.');
+    expect(tts.count('speak'), 0);
+  });
+  test('unexpected failures never expose raw transport details', () async {
+    await session.start();
+    speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+    await drain();
+    answer.completeError(StateError('private transport details'));
+    await drain();
+    expect(session.state, AssistantState.error);
+    expect(session.error,
+        'Could not finish the response. Tap Resume to try again.');
   });
   test(
     'TTS failure stops the cycle without another model or ASR turn',

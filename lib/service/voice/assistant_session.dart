@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:anx_reader/service/chatgpt/protocol.dart';
 import 'assistant_tts.dart';
 import 'reader_voice.dart';
 
@@ -290,10 +291,14 @@ class AssistantSession extends ChangeNotifier {
       });
       // Only a real native completed event may rearm ASR; invoke success means
       // the request was accepted, not that audio playback finished.
-    } catch (_) {
+    } catch (failure) {
       if (_valid(generation) && (speakingId == null || _ttsId == speakingId))
         _fail(
-          'Could not finish the response. Tap Resume to try again.',
+          failure is ChatGptError
+              ? failure.message
+              : failure is TimeoutException
+                  ? 'The AI response timed out. Check the chat and saved changes before asking again.'
+                  : 'Could not finish the response. Tap Resume to try again.',
         );
     }
   }

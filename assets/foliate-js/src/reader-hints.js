@@ -115,6 +115,11 @@ function hintDocuments(host) {
     return [...new Set([host.document, ...windows(host).map(win => win.document)].filter(Boolean))]
 }
 function applyHintFilter(doc, host) {
+    // Density is now represented by tags. Retired book controls must not keep
+    // hiding hints behind the reader's tag filter, including late live hints.
+    for (const control of getReaderHintControls(host)) {
+        if (control.level !== 3) setReaderHintLevel(control.id, 3, host)
+    }
     const filter = host.__anxHintFilter ?? { only: {}, exclude: {} }
     if (!Object.keys(filter.only).length && !Object.keys(filter.exclude).length) {
         for (const element of doc.querySelectorAll('[data-anx-hint-filtered]')) element.removeAttribute('data-anx-hint-filtered')
@@ -166,4 +171,51 @@ export function getReaderHintTags(host = window) {
         }
     }
     return Object.fromEntries([...facets].map(([key, values]) => [key, [...values.values()].sort()]))
+}
+
+const paint = host => new Promise(resolve => host.requestAnimationFrame(() => host.requestAnimationFrame(resolve)))
+
+// Temporarily render a real sample from the loaded chapter for a native
+// screenshot. No book data, saved filter, navigation history or progress changes.
+export async function beginReaderHintPreview(raw, host = window) {
+    if (host.__anxHintPreview) throw new Error('A hint preview is already open')
+    const view = host.reader?.view
+    const contents = view?.renderer?.getContents?.() ?? []
+    const location = view?.lastLocation?.range
+    const content = contents.find(x => x.doc === location?.startContainer.ownerDocument) ??
+        contents.find(x => x.index === view?.renderer?.index)
+    if (!content?.doc || !location && !view.book?.isPDF) throw new Error('The chapter is not ready for preview')
+    const filter = { only: normalizeHintTags(raw.only, 128, 512), exclude: normalizeHintTags(raw.exclude, 128, 512) }
+    const matches = [...content.doc.querySelectorAll(hintSelector)].filter(el => matchesHintFilter(hintTags(el), filter))
+    const caret = location?.cloneRange(); caret?.collapse(true)
+    host.__anxHintPreview = { filter: host.__anxHintFilter ?? {}, index: content.index, caret }
+    try {
+        setReaderHintFilter(filter, host)
+        const target = matches.find(el => { try { return location?.intersectsNode(el) } catch (_) { return false } }) ?? matches[0]
+        if (target && !view.book?.isPDF) {
+            const range = content.doc.createRange()
+            range.selectNodeContents(target.closest('ruby') ?? target); range.collapse(true)
+            await view.renderer.goTo({ index: content.index, anchor: () => range })
+        }
+        await paint(host)
+        return { matches: matches.length }
+    } catch (error) {
+        await endReaderHintPreview(host)
+        throw error
+    }
+}
+
+export async function endReaderHintPreview(host = window) {
+    const preview = host.__anxHintPreview
+    if (!preview) return false
+    try {
+        setReaderHintFilter(preview.filter, host)
+        if (!host.reader?.view?.book?.isPDF) {
+            await host.reader.view.renderer.goTo({ index: preview.index, anchor: () => preview.caret })
+        }
+        await paint(host)
+        return true
+    } finally {
+        delete host.__anxHintPreview
+    }
 }

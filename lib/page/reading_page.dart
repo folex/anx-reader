@@ -220,14 +220,13 @@ class ReadingPageState extends ConsumerState<ReadingPage>
         isScrollControlled: true,
         showDragHandle: true,
         builder: (_) => ReaderHintSettings(
-          controls: controls,
           tags: tags,
           filter: filter,
-          setLevel: (id, value) async {
+          preview: (next) async {
             if (!current()) throw StateError('Book changed');
-            return await controller.evaluateJavascript(
-                    source: jsCall('setReaderHintLevel', [id, value])) ==
-                true;
+            final player = epubPlayerKey.currentState;
+            if (player == null) throw StateError('Book is not ready');
+            return player.captureHintPreview(next);
           },
           setFilter: (next) async {
             if (!current()) throw StateError('Book changed');

@@ -1,5 +1,6 @@
 import 'package:anx_reader/utils/toast/common.dart';
 import 'package:anx_reader/models/reader_hint_filter.dart';
+import 'package:anx_reader/models/reader_hint_preview.dart';
 import 'package:anx_reader/service/reader_edits/reader_book_images.dart';
 import 'package:anx_reader/service/reader_edits/book_image_assets.dart';
 import 'package:anx_reader/service/reader_edits/book_image_generation.dart';
@@ -108,6 +109,42 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   AnimationController? _animationController;
   Animation<double>? _animation;
   bool showHistory = false;
+  bool _hintPreviewActive = false;
+
+  Future<ReaderHintPreview> captureHintPreview(ReaderHintFilter filter) async {
+    if (_hintPreviewActive) {
+      throw StateError('A hint preview is already active');
+    }
+    _hintPreviewActive = true;
+    bool started = false;
+    try {
+      final result = await webViewController.callAsyncJavaScript(
+        functionBody: 'return await ${jsCall('beginReaderHintPreview', [filter.toRules()])};');
+      final metadata = result?.value;
+      if (metadata is! Map || metadata['matches'] is! num) {
+        throw StateError('The chapter is not ready for preview');
+      }
+      started = true;
+      final image = await webViewController.takeScreenshot();
+      if (image == null) {
+        throw StateError('Could not capture the book preview');
+      }
+      return ReaderHintPreview(
+        image: image, matches: (metadata['matches'] as num).toInt());
+    } finally {
+      try {
+        if (mounted) {
+          final restored = await webViewController.callAsyncJavaScript(
+            functionBody: 'return await endReaderHintPreview();');
+          if (started && restored?.value != true) {
+            throw StateError('Could not restore the reading position');
+          }
+        }
+      } finally {
+        _hintPreviewActive = false;
+      }
+    }
+  }
   bool _brightnessUiBlocked = true;
 
   void refreshBrightnessGesture() {
@@ -1147,6 +1184,7 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
     controller.addJavaScriptHandler(
       handlerName: 'onRelocated',
       callback: (args) {
+        if (_hintPreviewActive) return;
         Map<String, dynamic> location = args[0];
         if (cfi == location['cfi']) return;
         // if (chapterHref != location['chapterHref']) {

@@ -1,6 +1,6 @@
 import { currentReaderContent, pdfReaderText, preparePdfEdits, renderPdfHints } from './pdf-hints.js'
 import { prepareBookImageInsertion, applyBookImageTheme, darkBookBackground, visibleBookImageIndices } from './book-images.js'
-import { hideEmbeddedHintControls, getReaderHintControls, setReaderHintLevel, refreshReaderHints, installReaderHintFilters, setReaderHintFilter, getReaderHintTags } from './reader-hints.js'
+import { hideEmbeddedHintControls, getReaderHintControls, refreshReaderHints, installReaderHintFilters, setReaderHintFilter, getReaderHintTags, beginReaderHintPreview, endReaderHintPreview } from './reader-hints.js'
 import { prepareEpubEditForBridge, captureReaderEditLocation, restoreReaderEditLocation } from './epub-edit.js'
 console.log('book.js')
 console.log('AnxUA', navigator.userAgent)
@@ -1572,6 +1572,7 @@ const refreshLayout = () => {
 
 
 const onRelocated = (currentInfo) => {
+  if (window.__anxHintPreview) return
   const chapterTitle = currentInfo.tocItem?.label ?? (reader.view.book.isPDF ? `Page ${reader.view.renderer.index + 1}` : '')
   const contentIndex = currentReaderContent(reader.view)?.index
   const chapterHref = reader.view.book.sections?.[contentIndex]?.id ?? currentInfo.tocItem?.href
@@ -2207,7 +2208,8 @@ window.captureReaderEditLocation = () => captureReaderEditLocation(globalThis.re
 window.restoreReaderEditLocation = location => restoreReaderEditLocation(() => globalThis.reader?.view, location)
 
 window.getReaderHintControls = () => JSON.stringify(getReaderHintControls())
-window.setReaderHintLevel = (id, level) => setReaderHintLevel(id, level)
+window.beginReaderHintPreview = filter => beginReaderHintPreview(filter)
+window.endReaderHintPreview = () => endReaderHintPreview()
 window.refreshReaderHints = () => refreshReaderHints()
 
 window.prepareBookImageInsertion = (source, spec) => prepareBookImageInsertion(source, spec)

@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:anx_reader/models/reader_hint_preview.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:anx_reader/models/reader_hint_filter.dart';
 import 'package:anx_reader/widgets/ai/reader_hint_settings.dart';
@@ -11,22 +13,28 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    ReaderHintFilter? saved;
+    ReaderHintFilter? saved, previewed;
     await tester.pumpWidget(MaterialApp(
         home: MediaQuery(
             data: const MediaQueryData(
                 size: Size(320, 900), textScaler: TextScaler.linear(1.5)),
             child: Scaffold(
                 body: ReaderHintSettings(
-                    controls: const [],
                     tags: const {
-                  'difficulty': ['C1']
+                  'difficulty': ['C1', 'B1']
                 },
                     filter: ReaderHintFilter(),
-                    setLevel: (_, __) async => true,
+                    preview: (filter) async {
+                      previewed = filter;
+                      return ReaderHintPreview(
+                          matches: 1,
+                          image: base64Decode(
+                              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=='));
+                    },
                     setFilter: (filter) async {
                       saved = filter;
                     })))));
+    expect(find.byType(DropdownButton<int>), findsNothing);
     await tester.ensureVisible(find.byTooltip('Hide difficulty: C1'));
     await tester.tap(find.byTooltip('Hide difficulty: C1'));
     await tester.pumpAndSettle();
@@ -41,12 +49,49 @@ void main() {
     expect(saved!.only, {
       'difficulty': ['C1']
     });
+    final beforePreview = saved;
+    await tester.ensureVisible(find.text('Preview'));
+    await tester.tap(find.text('Preview'));
+    await tester.pump();
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pumpAndSettle();
+    expect(previewed!.only, {
+      'difficulty': ['C1']
+    });
+    expect(find.byTooltip('Close preview'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close preview'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('difficulty'));
+    await tester.tap(find.text('difficulty'));
+    await tester.pump();
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pumpAndSettle();
+    expect(previewed!.only['difficulty'], unorderedEquals(['C1', 'B1']));
+    expect(identical(saved, beforePreview), isTrue);
+    await tester.tap(find.byTooltip('Close preview'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('B1'));
+    await tester.tap(find.text('B1'));
+    await tester.pump();
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pumpAndSettle();
+    expect(previewed!.only, {
+      'difficulty': ['B1']
+    });
+    expect(previewed!.exclude, isEmpty);
+    expect(identical(saved, beforePreview), isTrue);
+    await tester.tap(find.byTooltip('Close preview'));
+    await tester.pumpAndSettle();
+
     expect(tester.takeException(), isNull);
     await tester.ensureVisible(find.text('Clear filters'));
     await tester.tap(find.text('Clear filters'));
     await tester.pumpAndSettle();
     expect(saved!.active, false);
-    expect(saved!.catalog['difficulty'], ['C1']);
+    expect(saved!.catalog['difficulty'], unorderedEquals(['C1', 'B1']));
     await tester.ensureVisible(find.text('Add tag'));
     await tester.tap(find.text('Add tag'));
     await tester.pumpAndSettle();

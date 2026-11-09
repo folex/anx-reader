@@ -1,3 +1,4 @@
+import 'extension_tool.dart';
 import 'reader_image_tool.dart';
 import 'library_content_search_tool.dart';
 import 'package:anx_reader/service/ai/tools/reader_context_tool.dart';
@@ -112,17 +113,18 @@ class AiToolRegistry {
     ...readerImageToolDefinitions,
   ];
 
-  static final Map<String, AiToolDefinition> _definitionMap = {
-    for (final def in _definitions) def.id: def,
-  };
+  static Map<String, AiToolDefinition> get _definitionMap => {
+        for (final def in definitions) def.id: def,
+      };
 
   static List<AiToolDefinition> get definitions =>
-      List<AiToolDefinition>.unmodifiable(_definitions);
+      List<AiToolDefinition>.unmodifiable(
+          [..._definitions, ...extensionToolDefinitions()]);
 
   static AiToolDefinition? byId(String id) => _definitionMap[id];
 
   static List<String> defaultEnabledToolIds() =>
-      _definitions.map((def) => def.id).toList(growable: false);
+      definitions.map((def) => def.id).toList(growable: false);
 
   static List<String> sanitizeIds(List<String> ids) {
     final seen = <String>{};
@@ -137,7 +139,7 @@ class AiToolRegistry {
 
   static List<Tool> buildTools(AiToolContext context, List<String> enabledIds) {
     final enabled = enabledIds.toSet();
-    return _definitions
+    return definitions
         .where((def) => enabled.contains(def.id))
         .map((def) => def.build(context))
         .toList(growable: false);

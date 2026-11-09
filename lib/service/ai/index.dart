@@ -1,3 +1,4 @@
+import 'package:anx_reader/service/extensions/extension_manager.dart';
 import 'package:langchain_core/tools.dart';
 import 'package:anx_reader/service/ai/tools/ai_tool_registry.dart';
 import 'package:anx_reader/service/reader_edits/reader_edit_bridge.dart';
@@ -100,6 +101,7 @@ Stream<String> _generateStream({
   CurrentReadingState? expectedBook,
   int? expectedRequestRevision,
 }) async* {
+  if (Platform.isAndroid) await ExtensionManager.instance.initialize();
   final chatgpt = ChatGptPlan.instance;
   try {
     await chatgpt.initialize();
@@ -157,9 +159,15 @@ Stream<String> _generateStream({
         readingBefore?.isReading != readingAfter?.isReading) {
       throw StateError("The book or account changed. Ask again.");
     }
-    final enabledBookTools = (registry.toolIdsOverride ?? bookAssistantToolIds)
-        .where((id) => libraryBookToolIds.contains(id) ||
-            (readingAfter?.isReading == true && editHandlers != null &&
+    final enabledBookTools = [
+      ...(registry.toolIdsOverride ?? bookAssistantToolIds),
+      ...ExtensionManager.instance.toolIds
+    ]
+        .where((id) =>
+            ExtensionManager.instance.toolIds.contains(id) ||
+            libraryBookToolIds.contains(id) ||
+            (readingAfter?.isReading == true &&
+                editHandlers != null &&
                 readerBookToolIds.contains(id)))
         .toList();
     final boundTools = useAgent && ref != null && editScopeCurrent()
@@ -461,27 +469,25 @@ String _mapError(Object error) {
 }
 
 List<ChatMessage> _sanitizeMessagesForPrompt(List<ChatMessage> messages) {
-  return messages
-      .map((message) {
-        if (message is AIChatMessage) {
-          if (message.reasoningContent.isNotEmpty) {
-            return AIChatMessage(
-              content: message.content,
-              toolCalls: message.toolCalls,
-            );
-          }
-          final plainText = reasoningContentToPlainText(message.content);
-          if (plainText == message.content) {
-            return message;
-          }
-          return AIChatMessage(
-            content: plainText,
-            toolCalls: message.toolCalls,
-          );
-        }
+  return messages.map((message) {
+    if (message is AIChatMessage) {
+      if (message.reasoningContent.isNotEmpty) {
+        return AIChatMessage(
+          content: message.content,
+          toolCalls: message.toolCalls,
+        );
+      }
+      final plainText = reasoningContentToPlainText(message.content);
+      if (plainText == message.content) {
         return message;
-      })
-      .toList(growable: false);
+      }
+      return AIChatMessage(
+        content: plainText,
+        toolCalls: message.toolCalls,
+      );
+    }
+    return message;
+  }).toList(growable: false);
 }
 
 String? _latestUserMessage(List<ChatMessage> messages) {

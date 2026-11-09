@@ -7,7 +7,8 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    # The reader's platform adapter supports macOS, but not Linux.
+    runs-on: macos-14
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -19,7 +20,9 @@ jobs:
       - run: flutter gen-l10n
       - run: dart run build_runner build --delete-conflicting-outputs
       - name: Generate local test-only TLS certificates
-        run: sh test/support/generate_tls.sh "$RUNNER_TEMP/anx-tls"
+        run: |
+          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          sh test/support/generate_tls.sh "$RUNNER_TEMP/anx-tls"
       - name: Run reader and extension regression tests
         env:
           ANX_TLS_TEST_DIR: ${{ runner.temp }}/anx-tls

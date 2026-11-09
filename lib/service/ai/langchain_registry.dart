@@ -1,3 +1,4 @@
+import 'package:anx_reader/service/extensions/extension_manager.dart';
 import 'dart:io';
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
@@ -106,9 +107,15 @@ class LangchainAiRegistry {
 
     if (useAgent) {
       final enabledIds = AiToolRegistry.sanitizeIds(
-        toolIdsOverride ??
-            [...Prefs().enabledAiToolIds, ...libraryBookToolIds,
-              if (isReading) ...readerBookToolIds],
+        [
+          ...(toolIdsOverride ??
+              [
+                ...Prefs().enabledAiToolIds,
+                ...libraryBookToolIds,
+                if (isReading) ...readerBookToolIds
+              ]),
+          ...ExtensionManager.instance.toolIds
+        ],
       ).where((id) => isReading || !readerBookToolIds.contains(id)).toList();
       final toolContext = AiToolContext(
         ref: ref!,
@@ -156,8 +163,7 @@ class LangchainAiRegistry {
       'tr': 'Türkçe',
     };
 
-    final languageName =
-        languageMap[currentLanguageCode] ??
+    final languageName = languageMap[currentLanguageCode] ??
         languageMap[currentLanguageCode.split('_').first] ??
         currentLanguageCode;
 

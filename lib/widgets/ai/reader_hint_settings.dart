@@ -1,19 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:anx_reader/models/reader_hint_preview.dart';
 import 'package:anx_reader/models/reader_hint_filter.dart';
 
 class ReaderHintSettings extends StatefulWidget {
   const ReaderHintSettings(
       {super.key,
-      required this.controls,
       required this.tags,
       required this.filter,
-      required this.setLevel,
+      required this.preview,
       required this.setFilter,
       this.refresh});
-  final List<Map> controls;
   final Map<String, List<String>> tags;
   final ReaderHintFilter filter;
-  final Future<bool> Function(String, int) setLevel;
+  final Future<ReaderHintPreview> Function(ReaderHintFilter) preview;
   final Future<void> Function(ReaderHintFilter) setFilter;
   final Future<Map<String, List<String>>> Function()? refresh;
   @override
@@ -37,10 +36,57 @@ class _ReaderHintSettingsState extends State<ReaderHintSettings> {
       await widget.setFilter(next);
       if (mounted) setState(() => _filter = next);
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         setState(() => _error = 'Could not apply filters. Try again.');
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _preview(ReaderHintFilter filter, String title) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    // Capture the renderer below this sheet, then restore it before showing the
+    // snapshot. Opening or closing the preview never saves a different filter.
+    try {
+      final preview = await widget.preview(filter);
+      if (!mounted) return;
+      setState(() => _busy = false);
+      await showDialog<void>(
+          context: context,
+          builder: (context) => Dialog(
+              insetPadding: const EdgeInsets.all(12),
+              child: SizedBox(
+                  height: MediaQuery.sizeOf(context).height * .9,
+                  child: Column(children: [
+                    ListTile(
+                        title: Text(title),
+                        subtitle: Text(preview.matches == 0
+                            ? 'No matching hints in this chapter'
+                            : 'Chapter preview · pinch to zoom'),
+                        trailing: IconButton(
+                            tooltip: 'Close preview',
+                            icon: const Icon(Icons.close),
+                            onPressed: () => Navigator.pop(context))),
+                    Expanded(
+                        child: ClipRect(
+                            child: InteractiveViewer(
+                                maxScale: 4,
+                                child: Image.memory(preview.image,
+                                    fit: BoxFit.contain,
+                                    semanticLabel:
+                                        'Book preview with $title')))),
+                  ]))));
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = 'Could not preview hints. Try again.';
+        });
+      }
     }
   }
 
@@ -123,53 +169,12 @@ class _ReaderHintSettingsState extends State<ReaderHintSettings> {
                     leading: const Icon(Icons.subtitles_outlined),
                     title: Text('Reading hints',
                         style: Theme.of(context).textTheme.titleLarge)),
-                for (final control in widget.controls)
-                  Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Text(control['label']?.toString() ?? 'Hints'),
-                            DropdownButton<int>(
-                                isExpanded: true,
-                                value: [0, 1, 2, 3].contains(control['level'])
-                                    ? control['level'] as int
-                                    : 3,
-                                items: const [
-                                  DropdownMenuItem(
-                                      value: 0, child: Text('Off')),
-                                  DropdownMenuItem(
-                                      value: 1, child: Text('Few')),
-                                  DropdownMenuItem(
-                                      value: 2, child: Text('Some')),
-                                  DropdownMenuItem(
-                                      value: 3, child: Text('Many'))
-                                ],
-                                onChanged: _busy
-                                    ? null
-                                    : (level) async {
-                                        if (level == null) return;
-                                        setState(() {
-                                          _busy = true;
-                                          _error = null;
-                                        });
-                                        try {
-                                          if (await widget.setLevel(
-                                                  control['id'].toString(),
-                                                  level) &&
-                                              mounted)
-                                            setState(
-                                                () => control['level'] = level);
-                                        } catch (_) {
-                                          if (mounted)
-                                            setState(() => _error =
-                                                'Could not change hint level.');
-                                        } finally {
-                                          if (mounted)
-                                            setState(() => _busy = false);
-                                        }
-                                      }),
-                          ])),
+                FilledButton.tonalIcon(
+                    icon: const Icon(Icons.preview_outlined),
+                    label: const Text('Preview'),
+                    onPressed: _busy
+                        ? null
+                        : () => _preview(_filter, 'Current filters')),
                 if (widget.refresh != null)
                   TextButton.icon(
                       icon: const Icon(Icons.refresh),
@@ -185,9 +190,10 @@ class _ReaderHintSettingsState extends State<ReaderHintSettings> {
                                 final tags = await widget.refresh!();
                                 if (mounted) setState(() => _tags = tags);
                               } catch (_) {
-                                if (mounted)
+                                if (mounted) {
                                   setState(() =>
                                       _error = 'Could not refresh hints.');
+                                }
                               } finally {
                                 if (mounted) setState(() => _busy = false);
                               }
@@ -200,7 +206,7 @@ class _ReaderHintSettingsState extends State<ReaderHintSettings> {
                     'Eye: show or hide a tag. Focus: show only focused tags (any match). Hidden tags stay hidden.'),
                 const SizedBox(height: 8),
                 const Text(
-                    'Tags are independent. Showing one tag does not hide others. Existing density levels still apply.'),
+                    'Tags are independent. Tap a tag to preview its hints. Showing one tag does not hide others.'),
                 Wrap(spacing: 8, children: [
                   TextButton.icon(
                       icon: const Icon(Icons.add),
@@ -226,13 +232,47 @@ class _ReaderHintSettingsState extends State<ReaderHintSettings> {
                   ExpansionTile(
                       tilePadding: EdgeInsets.zero,
                       initiallyExpanded: true,
-                      title: Text(category),
+                      title: Row(children: [
+                        Expanded(
+                            child: InkWell(
+                                onTap: _busy
+                                    ? null
+                                    : () => _preview(
+                                        ReaderHintFilter(
+                                            only: {category: tags[category]!}),
+                                        category),
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 12),
+                                    child: Text(category)))),
+                        IconButton(
+                            tooltip: 'Preview $category',
+                            icon: const Icon(Icons.preview_outlined),
+                            onPressed: _busy
+                                ? null
+                                : () => _preview(
+                                    ReaderHintFilter(
+                                        only: {category: tags[category]!}),
+                                    category)),
+                      ]),
                       children: [
                         for (final value in tags[category]!..sort())
                           Padding(
                               padding: const EdgeInsets.only(bottom: 4),
                               child: Row(children: [
-                                Expanded(child: Text(value)),
+                                Expanded(
+                                    child: InkWell(
+                                        onTap: _busy
+                                            ? null
+                                            : () => _preview(
+                                                ReaderHintFilter(only: {
+                                                  category: [value]
+                                                }),
+                                                '$category: $value'),
+                                        child: Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                                vertical: 12),
+                                            child: Text(value)))),
                                 const SizedBox(width: 8),
                                 IconButton(
                                   tooltip:

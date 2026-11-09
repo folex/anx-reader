@@ -1,0 +1,44 @@
+<!doctype html><meta charset="utf-8"><iframe style="width:420px;height:700px"></iframe><script type="module">
+import * as hints from '../src/reader-hints.js';
+window.runTests = async () => {
+ const checks = []; const check = (name, ok) => checks.push({name, ok: !!ok});
+ const frame=document.querySelector('iframe'),doc=frame.contentDocument;
+ doc.open(); doc.write(`<html><head><style>body{font:24px Georgia;background:#292929;color:#eee;line-height:1.7}rt{font:12px sans-serif}p{margin:24px}</style></head><body>
+ <p id="start">El viajero espera en casa.</p>
+ <p>La <ruby>ira<rt data-anx-edit-tier="3" data-anx-edit-group="Vocabulary" data-anx-hint-tags='{"difficulty":["C1"]}'>anger</rt></ruby> se fue.</p>
+ <p>El bosque<a href="#note" data-anx-ai-ref="1" data-anx-edit-group="Grammar" data-anx-edit-tier="2" data-anx-hint-tags='{"difficulty":["B1"],"topic":["travel"]}'>[1]</a> era oscuro.</p>
+ <aside id="note">Imperfecto: background description.</aside></body></html>`); doc.close();
+ const ruby=doc.querySelector('rt'),ref=doc.querySelector('a');
+ ruby.hidden=true;
+ const select=document.createElement('select');select.innerHTML='<option value="0">Off</option><option value="3">Many</option>';
+ window.__anxEditGroups_fixture={levels:{Vocabulary:0},groups:new Map([['Vocabulary',{querySelector:()=>select}]])};
+ select.onchange=()=>{window.__anxEditGroups_fixture.levels.Vocabulary=Number(select.value);ruby.hidden=false};
+ const original=doc.createRange(); original.selectNodeContents(doc.getElementById('start'));original.collapse(true);
+ let caret=original, moves=0;
+ const view={book:{isPDF:false},lastLocation:{range:original},renderer:{index:0,getContents:()=>[{doc,index:0}],goTo:async({anchor})=>{caret=anchor();moves++}}};
+ window.reader={view};
+ hints.installReaderHintFilters(doc,window);
+ check('retired stored density no longer hides tier3 hints',!ruby.hidden&&window.__anxEditGroups_fixture.levels.Vocabulary===3);
+ hints.setReaderHintFilter({exclude:{difficulty:['C1']}},window);
+ const before=doc.body.innerHTML,filter=JSON.stringify(window.__anxHintFilter);
+ const sample=await hints.beginReaderHintPreview({only:{difficulty:['C1']}},window);
+ check('single tag preview shows hidden C1 without unrelated B1',sample.matches===1&&doc.defaultView.getComputedStyle(ruby).display!=='none'&&doc.defaultView.getComputedStyle(ref).display==='none');
+ check('preview moves to an actual matching book passage',caret.startContainer===ruby.closest('ruby')&&moves===1);
+ check('original Spanish text and footnote href stay intact',doc.querySelector('ruby').textContent.includes('ira')&&ref.getAttribute('href')==='#note');
+ await hints.endReaderHintPreview(window);
+ check('closing restores the exact original caret and saved filter',caret.startContainer===original.startContainer&&caret.startOffset===original.startOffset&&JSON.stringify(window.__anxHintFilter)===filter&&!window.__anxHintPreview);
+ check('preview does not rewrite book content',doc.body.innerHTML===before);
+ const all=await hints.beginReaderHintPreview({only:{difficulty:['C1','B1']}},window);
+ check('combined preview includes all matching tags',all.matches===2);
+ await hints.endReaderHintPreview(window);
+ const empty=await hints.beginReaderHintPreview({only:{topic:['missing']}},window);
+ check('missing groups return an honest empty result',empty.matches===0);
+ await hints.endReaderHintPreview(window);
+ view.renderer.goTo=async()=>{throw Error('renderer unavailable')};
+ try{await hints.beginReaderHintPreview({only:{difficulty:['C1']}},window)}catch(_){}
+ check('failed renderer still restores filter and exits preview',!window.__anxHintPreview&&JSON.stringify(window.__anxHintFilter)===filter);
+ view.book.isPDF=true;view.lastLocation.range=null; const beforePdf=moves;
+ const pdf=await hints.beginReaderHintPreview({only:{difficulty:['B1']}},window);await hints.endReaderHintPreview(window);
+ check('PDF preview filters overlays without moving pages',pdf.matches===1&&moves===beforePdf&&!window.__anxHintPreview);
+ return {ok:checks.every(x=>x.ok),checks,metrics:[]};
+};</script>

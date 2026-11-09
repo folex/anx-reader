@@ -27,18 +27,18 @@ abstract class BgimgModel with _$BgimgModel {
   String get url => switch (type) {
         BgimgType.none => 'none',
         BgimgType.assets =>
-          'http://127.0.0.1:${Server().port}/bgimg/assets/$path',
+          '${Server().baseUrl}/bgimg/assets/$path',
         BgimgType.localFile =>
-          'http://127.0.0.1:${Server().port}/bgimg/local/$path',
+          '${Server().baseUrl}/bgimg/local/$path',
       };
 
   String? get nightUrl => switch (type) {
         BgimgType.none => null,
         BgimgType.assets => nightPath != null
-            ? 'http://127.0.0.1:${Server().port}/bgimg/assets/$nightPath'
+            ? '${Server().baseUrl}/bgimg/assets/$nightPath'
             : null,
         BgimgType.localFile => nightPath != null
-            ? 'http://127.0.0.1:${Server().port}/bgimg/local/$nightPath'
+            ? '${Server().baseUrl}/bgimg/local/$nightPath'
             : null,
       };
 

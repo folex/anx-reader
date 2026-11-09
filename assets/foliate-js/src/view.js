@@ -510,8 +510,8 @@ export class View extends HTMLElement {
       const subitems = Array.from(matcher(doc, query), ({ range, excerpt }) =>
         ({ cfi: this.getCFI(index, range), excerpt }))
       const progress = (index + 1) / sections.length
-      yield { progress }
       if (subitems.length) yield { index, subitems }
+      yield { progress }
     }
   }
   async * search(opts) {
@@ -535,7 +535,9 @@ export class View extends HTMLElement {
         this.#searchResults.set(result.index, list)
         for (const item of list) this.addAnnotation(item)
         yield {
-          label: this.#tocProgress.getProgress(result.index)?.label ?? '',
+          label: this.#tocProgress.getProgress(result.index)?.label
+            || (this.book.isPDF ? `Page ${result.index + 1}` : `Section ${result.index + 1}`),
+          cfi: this.getCFI(result.index),
           subitems: result.subitems,
         }
       }

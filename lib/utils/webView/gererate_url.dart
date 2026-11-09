@@ -17,9 +17,9 @@ String generateUrl(
   String? backgroundColor,
   bool? importing,
   bool isDarkMode = false,
+  Map<String, dynamic>? hintFilter,
 }) {
-  String indexHtmlPath =
-      "http://127.0.0.1:${Server().port}/foliate-js/index.html";
+  String indexHtmlPath = "${Server().baseUrl}/foliate-js/index.html";
 
   ReadTheme readTheme = Prefs().readTheme;
   bookStyle ??= Prefs().bookStyle;
@@ -67,6 +67,7 @@ String generateUrl(
 
   Map<String, dynamic> style = {
     'fontSize': bookStyle.fontSize,
+    'footnoteAppearance': Prefs().footnoteAppearance.toMap(),
     'fontName': fontName,
     'fontPath': fontPath,
     'fontWeight': bookStyle.fontWeight,
@@ -105,6 +106,7 @@ String generateUrl(
 
   Map<String, dynamic> params = {
     'importing': importing,
+    'hintFilter': hintFilter ?? <String, dynamic>{},
     'url': url,
     'initialCfi': cfi,
     'style': style,

@@ -45,6 +45,16 @@ class InitializationCheck {
       return VersionCheckType.firstLaunch;
     } else {
       if (_lastVersion != _currentVersion) {
+        // Personal revisions carry their own release notes in the updater.
+        // Do not replay the unchanged upstream changelog on every revision.
+        final current = _currentVersion!;
+        final previousCore =
+            _lastVersion!.split('+').first.split('-personal.').first;
+        final currentCore = current.split('+').first.split('-personal.').first;
+        if (current.contains('-personal.') && previousCore == currentCore) {
+          Prefs().lastAppVersion = current;
+          return VersionCheckType.normal;
+        }
         return VersionCheckType.updated;
       } else {
         return VersionCheckType.normal;

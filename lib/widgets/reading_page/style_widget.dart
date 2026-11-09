@@ -1,3 +1,4 @@
+import 'package:anx_reader/widgets/reading_page/footnote_appearance_settings.dart';
 import 'dart:io';
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
@@ -70,6 +71,15 @@ class StyleWidgetState extends State<StyleWidget> {
           sliders(),
           const SizedBox(height: 10),
           fontAndPageTurn(),
+          Align(alignment: Alignment.centerRight, child: TextButton.icon(
+            icon: const Icon(Icons.notes), label: const Text('Footnotes'),
+            onPressed: () => showModalBottomSheet<void>(
+              context: context, isScrollControlled: true, useSafeArea: true,
+              builder: (_) => SingleChildScrollView(child: FootnoteAppearanceSettings(
+                onChanged: (appearance) => widget.epubPlayerKey.currentState?.changeFootnoteAppearance(appearance),
+              )),
+            ),
+          )),
           const Divider(),
           Row(
             children: [
@@ -122,7 +132,7 @@ class StyleWidgetState extends State<StyleWidget> {
     //       label: getFontNameFromFile(element),
     //       name: 'customFont' + ,
     //       path:
-    //           'http://127.0.0.1:${Server().port}/fonts/${element.path.split('/').last}',
+    //           '${Server().baseUrl}/fonts/${element.path.split('/').last}',
     //     ));
     //   }
     // });
@@ -133,7 +143,7 @@ class StyleWidgetState extends State<StyleWidget> {
         label: getFontNameFromFile(element),
         name: 'customFont$i',
         path:
-            'http://127.0.0.1:${Server().port}/fonts/${element.path.split(Platform.pathSeparator).last}',
+            '${Server().baseUrl}/fonts/${element.path.split(Platform.pathSeparator).last}',
       ));
     }
 
@@ -234,7 +244,7 @@ class StyleWidgetState extends State<StyleWidget> {
   }
 
   Row lineHeightAndParagraphSpacingSlider() {
-    bool enabled = !Prefs().useBookStyles;
+    final paragraphEnabled = !Prefs().useBookStyles;
     return Row(
       children: [
         IconAndText(
@@ -245,20 +255,17 @@ class StyleWidgetState extends State<StyleWidget> {
           child: Slider(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               value: bookStyle.lineHeight,
-              onChanged: enabled
-                  ? (double value) {
-                      setState(() {
-                        bookStyle.lineHeight = value;
-                        widget.epubPlayerKey.currentState!
-                            .changeStyle(bookStyle);
-                        Prefs().saveBookStyleToPrefs(bookStyle);
-                      });
-                    }
-                  : null,
+              onChanged: (double value) {
+                setState(() {
+                  bookStyle.lineHeight = value;
+                  widget.epubPlayerKey.currentState!.changeStyle(bookStyle);
+                  Prefs().saveBookStyleToPrefs(bookStyle);
+                });
+              },
               min: 0,
               max: 3,
               divisions: 10,
-              label: (bookStyle.lineHeight / 3 * 10).round().toString()),
+              label: bookStyle.lineHeight.toStringAsFixed(1)),
         ),
         IconAndText(
           icon: const Icon(Icons.height),
@@ -268,7 +275,7 @@ class StyleWidgetState extends State<StyleWidget> {
           child: Slider(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             value: bookStyle.paragraphSpacing,
-            onChanged: enabled
+            onChanged: paragraphEnabled
                 ? (double value) {
                     setState(() {
                       bookStyle.paragraphSpacing = value;
@@ -288,7 +295,6 @@ class StyleWidgetState extends State<StyleWidget> {
   }
 
   Row fontSizeSlider() {
-    bool enabled = !Prefs().useBookStyles;
     return Row(
       children: [
         IconAndText(
@@ -298,19 +304,17 @@ class StyleWidgetState extends State<StyleWidget> {
         Expanded(
           child: Slider(
             value: bookStyle.fontSize,
-            onChanged: enabled
-                ? (double value) {
-                    setState(() {
-                      bookStyle.fontSize = value;
-                      widget.epubPlayerKey.currentState!.changeStyle(bookStyle);
-                      Prefs().saveBookStyleToPrefs(bookStyle);
-                    });
-                  }
-                : null,
+            onChanged: (double value) {
+              setState(() {
+                bookStyle.fontSize = value;
+                widget.epubPlayerKey.currentState!.changeStyle(bookStyle);
+                Prefs().saveBookStyleToPrefs(bookStyle);
+              });
+            },
             min: 0.5,
             max: 3.0,
             divisions: 25,
-            label: bookStyle.fontSize.toStringAsFixed(2),
+            label: '${bookStyle.fontSize.toStringAsFixed(2)}${Prefs().useBookStyles ? '×' : ''}',
           ),
         ),
       ],

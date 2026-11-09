@@ -1,8 +1,13 @@
+import { currentReaderContent, pdfReaderText, preparePdfEdits, renderPdfHints } from './pdf-hints.js'
+import { prepareBookImageInsertion, applyBookImageTheme, darkBookBackground, visibleBookImageIndices } from './book-images.js'
+import { hideEmbeddedHintControls, getReaderHintControls, setReaderHintLevel, refreshReaderHints, installReaderHintFilters, setReaderHintFilter, getReaderHintTags } from './reader-hints.js'
+import { prepareEpubEditForBridge, captureReaderEditLocation, restoreReaderEditLocation } from './epub-edit.js'
 console.log('book.js')
 console.log('AnxUA', navigator.userAgent)
 
 import './view.js'
 import { FootnoteHandler } from './footnotes.js'
+import { FootnoteAppearanceController } from './footnote-appearance.js'
 import { Overlayer } from './overlayer.js'
 import { collapse, compare, fromRange, toRange } from './epubcfi.js'
 const { configure, ZipReader, BlobReader, TextWriter, BlobWriter } =
@@ -575,7 +580,7 @@ const getCSS = ({ fontSize,
     }
     
     a > img {
-        font-size: ${fontSize}em !important;
+        ${useBookStyles ? '' : `font-size: ${fontSize}em !important;`}
     }
 
     * {
@@ -824,6 +829,11 @@ const readingFeaturesDocHandler = (doc) => {
 
 
 const footnoteDialog = document.getElementById('footnote-dialog')
+const footnoteAppearance = new FootnoteAppearanceController(footnoteDialog, () => style)
+window.setFootnoteAppearance = settings => {
+  footnoteAppearance.update(settings)
+  if (style) style.footnoteAppearance = { ...settings }
+}
 footnoteDialog.style.display = 'none'
 footnoteDialog.addEventListener('click', () => {
   // display none
@@ -844,33 +854,11 @@ const replaceFootnote = (view) => {
     doc.__isFootNote = true
 
 
-    setTimeout(() => {
-      const dialog = document.getElementById('footnote-dialog')
-      const content = document.querySelector("#footnote-dialog > main > foliate-view")
-        .shadowRoot.querySelector("foliate-paginator")
-        .shadowRoot.querySelector("#container > div > iframe")
+    // The load event supplies the actual document; avoid fragile shadow-root
+    // traversal and timers that guessed when its iframe might exist.
+    footnoteAppearance.applyDocument(doc)
+    footnoteDialog.style.display = 'block'
 
-      dialog.style.display = 'block'
-
-      // dialog.style.width = 'auto'
-      // dialog.style.height = 'auto'
-
-      // const contentWidth = content.clientWidth
-      // const contentHeight = content.clientHeight
-
-      // const squareSize = contentWidth * contentHeight
-
-      // dialog.style.height = 100 + 'px'
-      // dialog.style.width = squareSize / 100 + 'px'
-
-      // if (squareSize > window.innerWidth * 100 * 0.8) {
-      //   dialog.style.width = window.innerWidth * 0.8 + 'px'
-      //   dialog.style.height = squareSize / (window.innerWidth * 3.0) + 'px'
-      // }
-
-      //dialog.style.width = `${Math.min(Math.max(contentWidth, 200), window.innerWidth * 0.8)}px`
-      //dialog.style.height = `${Math.min(Math.max(contentHeight, 100), window.innerHeight * 0.8)}px`
-    }, 0)
   })
 
   const { renderer } = view
@@ -879,30 +867,18 @@ const replaceFootnote = (view) => {
   renderer.setAttribute('top-margin', '0px')
   renderer.setAttribute('bottom-margin', '0px')
   const footNoteStyle = {
-    fontSize: style.fontSize,
-    fontName: style.fontName,
-    fontPath: style.fontPath,
-    letterSpacing: style.letterSpacing,
-    spacing: style.spacing,
-    textIndent: style.textIndent,
-    fontColor: style.fontColor,
+    ...style,
+    // Keep the book's relative emphasis, but never reuse its font multiplier
+    // or custom reading CSS to size the popup.
+    useBookStyles: true,
+    customCSSEnabled: false,
+    fontSize: 1,
     backgroundColor: 'transparent',
-    justify: true,
-    textAlign: style.textAlign,
-    hyphenate: true,
-    customCSS: style.customCSS,
-    customCSSEnabled: style.customCSSEnabled,
-    writingMode: style.writingMode,
-    useBookStyles: style.useBookStyles,
-    headingFontSize: style.headingFontSize,
+    textIndent: 0,
   }
-  renderer.setStyles(getCSS(footNoteStyle))
-  // set background color of dialog
-  // if #rrggbbaa, replace aa to ee
-  footnoteDialog.style.backgroundColor = style.backgroundColor.slice(0, 7) + '33'
+  renderer.setStyles(getCSS(footNoteStyle), { fontScale: 1, lineSpacing: null })
+  footnoteAppearance.attachView(view)
 }
-footnoteDialog.addEventListener('click', e =>
-  e.target === footnoteDialog ? footnoteDialog.close() : null)
 
 class Reader {
   annotations = new Map()
@@ -927,7 +903,7 @@ class Reader {
     })
     this.#footnoteHandler.addEventListener('render', e => {
       const { view } = e.detail
-      footnoteDialog.showModal()
+      footnoteDialog.style.display = 'block'
     })
     this.#originalContent = null
   }
@@ -944,7 +920,7 @@ class Reader {
     this.view.addEventListener('doctouchend', this.#onTouchEnd.bind(this))
 
     setStyle()
-    if (!cfi)
+    if (!cfi && !this.view.book.isPDF)
       this.view.renderer.next()
     this.setView(this.view)
     await this.view.init({ lastLocation: cfi })
@@ -1133,6 +1109,10 @@ class Reader {
   }
 
   #onLoad({ detail: { doc, index } }) {
+    hideEmbeddedHintControls(document)
+    hideEmbeddedHintControls(doc)
+    installReaderHintFilters(doc)
+    applyBookImageTheme(doc, darkBookBackground(style.backgroundColor))
     this.#doc = doc
     this.#index = index
     setSelectionHandler(this.view, doc, index)
@@ -1145,7 +1125,8 @@ class Reader {
 
     this.#saveOriginalContent()
 
-    this.readingFeatures(readingRules)
+    if (this.view.book.isPDF) applyPdfHintsToDocument(doc, index).catch(error => console.warn('PDF hints:', error.message))
+    else this.readingFeatures(readingRules)
     
     // Apply code highlighting to newly loaded content
     if (style && style.codeHighlightTheme && style.codeHighlightTheme !== 'off') {
@@ -1236,7 +1217,7 @@ class Reader {
   }
 
   getChapterContent = () => {
-    return this.#doc.body.textContent
+    return this.view.book.isPDF ? pdfReaderText(currentReaderContent(this.view)?.doc) : this.#doc.body.textContent
   }
 
   getChapterContentByHref = async (target, options = {}) => {
@@ -1556,7 +1537,12 @@ const setStyle = (oldStyle) => {
     useBookStyles: style.useBookStyles,
     headingFontSize: style.headingFontSize
   }
-  reader.view.renderer.setStyles?.(getCSS(newStyle))
+  reader.view.renderer.setStyles?.(getCSS(newStyle), {
+    fontScale: style.useBookStyles ? style.fontSize : 1,
+    lineSpacing: style.spacing
+  })
+
+  for (const content of reader.view.renderer.getContents?.() ?? []) applyBookImageTheme(content.doc, darkBookBackground(style.backgroundColor))
 
   if (!style.useBookStyles && style.fontColor) {
     fixHeadingColor(style.fontColor)
@@ -1586,8 +1572,9 @@ const refreshLayout = () => {
 
 
 const onRelocated = (currentInfo) => {
-  const chapterTitle = currentInfo.tocItem?.label
-  const chapterHref = currentInfo.tocItem?.href
+  const chapterTitle = currentInfo.tocItem?.label ?? (reader.view.book.isPDF ? `Page ${reader.view.renderer.index + 1}` : '')
+  const contentIndex = currentReaderContent(reader.view)?.index
+  const chapterHref = reader.view.book.sections?.[contentIndex]?.id ?? currentInfo.tocItem?.href
   const chapterTotalPages = currentInfo.chapterLocation.total
   const chapterCurrentPage = currentInfo.chapterLocation.current
   const bookTotalPages = currentInfo.location.total
@@ -1644,6 +1631,8 @@ window.changeStyle = (newStyle) => {
   style = { ...style, ...newStyle }
   console.log('changeStyle', JSON.stringify(style))
   setStyle(oldStyle)
+  if (newStyle.footnoteAppearance !== undefined) footnoteAppearance.update(newStyle.footnoteAppearance)
+  else footnoteAppearance.refresh()
   
   // Update code highlighting theme if changed
   if (newStyle.codeHighlightTheme !== undefined) {
@@ -1845,7 +1834,7 @@ const CodeHighlighter = (() => {
   let prismLoading = null // Promise for loading, to avoid duplicate loads
   const LOAD_TIMEOUT = 10000 // 10 seconds timeout
   const MAX_RETRIES = 2
-  const PRISM_BASE_PATH = '/foliate-js/src/vendor/prism'
+  const PRISM_BASE_PATH = new URL('./src/vendor/prism', window.location.href).href
   
   // Track which documents have been processed to avoid duplicate work
   const processedDocs = new WeakSet()
@@ -2204,9 +2193,68 @@ var importing = JSON.parse(urlParams.get('importing'))
 var url = JSON.parse(urlParams.get('url'))
 var initialCfi = JSON.parse(urlParams.get('initialCfi'))
 var style = JSON.parse(urlParams.get('style'))
+try { setReaderHintFilter(JSON.parse(urlParams.get('hintFilter') || '{}')) } catch (_) { setReaderHintFilter({}) }
+footnoteAppearance.update(style?.footnoteAppearance)
 var readingRules = JSON.parse(urlParams.get('readingRules'))
 
 fetch(url)
   .then(res => res.blob())
   .then(blob => open(new File([blob], new URL(url, window.location.origin).pathname), initialCfi))
   .catch(e => console.error(e))
+
+window.prepareEpubEdit = prepareEpubEditForBridge
+window.captureReaderEditLocation = () => captureReaderEditLocation(globalThis.reader?.view)
+window.restoreReaderEditLocation = location => restoreReaderEditLocation(() => globalThis.reader?.view, location)
+
+window.getReaderHintControls = () => JSON.stringify(getReaderHintControls())
+window.setReaderHintLevel = (id, level) => setReaderHintLevel(id, level)
+window.refreshReaderHints = () => refreshReaderHints()
+
+window.prepareBookImageInsertion = (source, spec) => prepareBookImageInsertion(source, spec)
+window.visibleBookImageIndices = () => visibleBookImageIndices(globalThis.reader?.view)
+
+window.getReaderHintTags = () => JSON.stringify(getReaderHintTags())
+window.setReaderHintFilter = filter => setReaderHintFilter(filter)
+
+// PDF sidecar state is loaded by Flutter on book open, then reused for page loads.
+let pdfHintPages = {}
+function showPdfHintComment(text) {
+  document.querySelector('[data-anx-pdf-popup]')?.remove()
+  const popup = document.createElement('div')
+  popup.setAttribute('data-reader-footnote', '1'); popup.setAttribute('data-anx-pdf-popup', '1')
+  popup.setAttribute('role', 'dialog'); popup.setAttribute('aria-label', 'Explanation')
+  popup.style.cssText = 'position:fixed;left:5%;right:5%;top:50%;transform:translateY(-50%);z-index:2147483000;max-height:70vh;overflow:auto;padding:16px;border-radius:12px;box-shadow:0 4px 24px #0006;white-space:pre-wrap;line-height:1.5'
+  const close = document.createElement('button'); close.textContent = 'Close ×'
+  close.style.cssText = 'float:right;margin:0 0 8px 12px;color:inherit;background:transparent;border:0;font:inherit'
+  close.onclick = () => { popup.remove(); callFlutter('onFootnoteClose') }
+  const content = document.createElement('div'); content.textContent = text
+  popup.append(close, content); document.body.appendChild(popup)
+  footnoteAppearance.refresh()
+}
+async function applyPdfHintsToDocument(doc, index) {
+  if (!globalThis.reader?.view?.book?.isPDF) return
+  const href = globalThis.reader.view.book.sections[index]?.id
+  await renderPdfHints(doc, pdfHintPages[href] ?? [], showPdfHintComment)
+  installReaderHintFilters(doc)
+}
+window.setPdfHintPages = async pages => {
+  pdfHintPages = pages
+  await Promise.all((globalThis.reader?.view?.renderer?.getContents?.() ?? []).map(({ doc, index }) => applyPdfHintsToDocument(doc, index)))
+  return true
+}
+window.preparePdfEdits = async (input, records, href) => {
+  try {
+    const view = globalThis.reader?.view
+    const content = currentReaderContent(view)
+    if (view?.book?.sections[content?.index]?.id !== href) throw new Error('The PDF page changed')
+    return await preparePdfEdits(content?.doc, input, records)
+  } catch (error) { return { editError: String(error.message) } }
+}
+window.pdfReaderViewport = () => {
+  const doc = currentReaderContent(globalThis.reader?.view)?.doc
+  if (!doc?.documentElement.hasAttribute('data-anx-pdf-page')) return null
+  const selection = doc.getSelection()
+  const selected = selection?.rangeCount && !selection.isCollapsed ? pdfReaderText(doc, selection.getRangeAt(0)) : ''
+  const visible = pdfReaderText(doc)
+  return JSON.stringify({ visible: visible.slice(0, 6000), selection: selected.slice(0, 2000), visibleTruncated: visible.length > 6000, selectionTruncated: selected.length > 2000 })
+}

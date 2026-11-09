@@ -1,3 +1,4 @@
+import 'package:anx_reader/widgets/settings/chatgpt_plan_card.dart';
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/enums/ai_prompts.dart';
 import 'package:anx_reader/enums/ai_chat_display_mode.dart';
@@ -214,6 +215,7 @@ class _AISettingsState extends ConsumerState<AISettings> {
       SettingsSection(
         title: Text(L10n.of(context).settingsAiServices),
         tiles: [
+          CustomSettingsTile(child: Padding(padding: const EdgeInsets.all(16), child: ChatGptPlanCard())),
           SettingsTile.navigation(
             title: Text(l10n.settingsAiProviders),
             description: _buildProviderDescription(),

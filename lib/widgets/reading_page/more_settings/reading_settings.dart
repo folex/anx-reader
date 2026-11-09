@@ -10,6 +10,7 @@ import 'package:anx_reader/page/reading_page.dart';
 import 'package:anx_reader/page/settings_page/subpage/fonts.dart';
 import 'package:anx_reader/widgets/common/anx_segmented_button.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:icons_plus/icons_plus.dart';
 
 class ReadingMoreSettings extends StatefulWidget {
@@ -691,6 +692,17 @@ class _ReadingMoreSettingsState extends State<ReadingMoreSettings> {
       padding: const EdgeInsets.all(18.0),
       child: Column(
         children: [
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Brightness swipe on left edge'),
+              subtitle: const Text('Swipe up or down along the left edge of the page'),
+              value: Prefs().readerBrightnessGesture,
+              onChanged: (enabled) {
+                setState(() => Prefs().readerBrightnessGesture = enabled);
+                epubPlayerKey.currentState?.refreshBrightnessGesture();
+              },
+            ),
           downloadFonts(),
           const Divider(height: 20),
           writingMode(),

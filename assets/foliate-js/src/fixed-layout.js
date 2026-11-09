@@ -67,7 +67,8 @@ export class FixedLayout extends HTMLElement {
         })
         // `allow-scripts` is needed for events because of WebKit bug
         // https://bugs.webkit.org/show_bug.cgi?id=218086
-        iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts')
+        iframe.setAttribute('sandbox', JSON.parse(new URLSearchParams(location.search).get('style') || '{}').allowScript
+        ? 'allow-same-origin allow-scripts' : 'allow-same-origin')
         iframe.setAttribute('scrolling', 'no')
         iframe.setAttribute('part', 'filter')
         this.#root.append(element)
@@ -77,6 +78,7 @@ export class FixedLayout extends HTMLElement {
                 iframe.removeEventListener('load', onload)
                 const doc = iframe.contentDocument
                 doc.position = position
+                doc.__anxSectionIndex = index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
                 const { width, height } = getViewport(doc, this.defaultViewport)
                 resolve({
@@ -286,7 +288,8 @@ export class FixedLayout extends HTMLElement {
     getContents() {
         return Array.from(this.#root.querySelectorAll('iframe'), frame => ({
             doc: frame.contentDocument,
-            // TODO: index, overlayer
+            index: frame.contentDocument?.__anxSectionIndex,
+            // PDF hint overlays are rendered in page coordinates.
         }))
     }
     destroy() {

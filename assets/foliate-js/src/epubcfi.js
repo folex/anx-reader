@@ -188,7 +188,17 @@ export const compare = (a, b) => {
 const isTextNode = ({ nodeType }) => nodeType === 3 || nodeType === 4
 const isElementNode = ({ nodeType }) => nodeType === 1
 
+// Reader-owned additions must not change an existing EPUB's logical CFI tree.
+// Publisher markup and every unmarked element retain their original semantics.
+const readerEditFilter = node => {
+    if (!isElementNode(node)) return NodeFilter.FILTER_ACCEPT
+    if (node.hasAttribute('data-anx-edit-added')) return NodeFilter.FILTER_REJECT
+    if (node.hasAttribute('data-anx-edit-wrap')) return NodeFilter.FILTER_SKIP
+    return NodeFilter.FILTER_ACCEPT
+}
+
 const getChildNodes = (node, filter) => {
+    filter ??= readerEditFilter
     const nodes = Array.from(node.childNodes)
         // "content other than element and character data is ignored"
         .filter(node => isTextNode(node) || isElementNode(node))
@@ -258,7 +268,11 @@ const partsToNode = (node, parts, filter) => {
 }
 
 const nodeToParts = (node, offset, filter) => {
-    const { parentNode, id } = node
+    filter ??= readerEditFilter
+    let { parentNode } = node
+    const { id } = node
+    while (parentNode && filter(parentNode) === NodeFilter.FILTER_SKIP)
+        parentNode = parentNode.parentNode
     const indexed = indexChildNodes(parentNode, filter)
     const index = indexed.findIndex(x =>
         Array.isArray(x) ? x.some(x => x === node) : x === node)

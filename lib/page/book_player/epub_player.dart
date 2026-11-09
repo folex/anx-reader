@@ -1,6 +1,21 @@
+import 'package:anx_reader/utils/toast/common.dart';
+import 'package:anx_reader/models/reader_hint_filter.dart';
+import 'package:anx_reader/service/reader_edits/reader_book_images.dart';
+import 'package:anx_reader/service/reader_edits/book_image_assets.dart';
+import 'package:anx_reader/service/reader_edits/book_image_generation.dart';
+import 'package:anx_reader/models/footnote_appearance.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
+import 'package:anx_reader/service/reader_edits/reader_edit_bridge.dart';
+import 'package:anx_reader/service/reader_edits/epub_edit_store.dart';
+import 'package:anx_reader/service/reader_edits/pdf_hint_store.dart';
+import 'package:anx_reader/service/chatgpt/chatgpt_plan.dart';
+import 'package:anx_reader/service/voice/reader_assistant_context.dart';
+import 'package:anx_reader/service/ai/tools/repository/book_content_search_repository.dart';
+
+import 'package:anx_reader/widgets/reading_page/reader_brightness_gesture.dart';
 
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/dao/book.dart';
@@ -34,6 +49,7 @@ import 'package:anx_reader/service/tts/models/tts_sentence.dart';
 import 'package:anx_reader/service/tts/tts_handler.dart';
 import 'package:anx_reader/utils/coordinates_to_part.dart';
 import 'package:anx_reader/utils/js/convert_dart_color_to_js.dart';
+import 'package:anx_reader/utils/js/js_call.dart';
 import 'package:anx_reader/utils/platform_utils.dart';
 import 'package:anx_reader/models/book_note.dart';
 import 'package:anx_reader/utils/log/common.dart';
@@ -64,14 +80,15 @@ class EpubPlayer extends ConsumerStatefulWidget {
   final List<ReadTheme> initialThemes;
   final Function updateParent;
 
-  const EpubPlayer(
-      {super.key,
-      required this.showOrHideAppBarAndBottomBar,
-      required this.book,
-      this.cfi,
-      required this.onLoadEnd,
-      required this.initialThemes,
-      required this.updateParent});
+  const EpubPlayer({
+    super.key,
+    required this.showOrHideAppBarAndBottomBar,
+    required this.book,
+    this.cfi,
+    required this.onLoadEnd,
+    required this.initialThemes,
+    required this.updateParent,
+  });
 
   @override
   ConsumerState<EpubPlayer> createState() => EpubPlayerState();
@@ -91,6 +108,12 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   AnimationController? _animationController;
   Animation<double>? _animation;
   bool showHistory = false;
+  bool _brightnessUiBlocked = true;
+
+  void refreshBrightnessGesture() {
+    if (mounted) setState(() {});
+  }
+
   bool canGoBack = false;
   bool canGoForward = false;
   late Book book;
@@ -103,6 +126,9 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   String? _lastSelectionContextText;
   bool _selectionClearLocked = false;
   bool _selectionClearPending = false;
+  ReaderEditHandlers? _readerEditHandlers;
+  Map<String, dynamic>? _editReloadLocation;
+  Completer<bool>? _editReloadCompletion;
 
   // Scroll wheel debounce
   Timer? _scrollDebounceTimer;
@@ -122,29 +148,37 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   }
 
   void prevChapter() {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       prevSection()
-      ''');
+      ''',
+    );
   }
 
   void nextChapter() {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       nextSection()
-      ''');
+      ''',
+    );
   }
 
   void setTranslationMode(TranslationModeEnum mode) {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       if (typeof reader.view !== 'undefined' && reader.view.setTranslationMode) {
         reader.view.setTranslationMode('${mode.code}');
       }
-      ''');
+      ''',
+    );
   }
 
   Future<void> goToPercentage(double value) async {
-    await webViewController.evaluateJavascript(source: '''
+    await webViewController.evaluateJavascript(
+      source: '''
       goToPercent($value); 
-      ''');
+      ''',
+    );
   }
 
   void setSelectionClearLocked(bool locked) {
@@ -163,12 +197,22 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
     String bc = convertDartColorToJs(readTheme.backgroundColor);
     String tc = convertDartColorToJs(readTheme.textColor);
 
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       changeStyle({
         backgroundColor: '#$bc',
         fontColor: '#$tc',
       })
-      ''');
+      ''',
+    );
+  }
+
+  void changeFootnoteAppearance(FootnoteAppearance appearance) {
+    if (!mounted) return;
+    webViewController.evaluateJavascript(
+      source:
+          'window.setFootnoteAppearance?.(${jsonEncode(appearance.toMap())});',
+    );
   }
 
   void changeStyle(BookStyle? bookStyle) {
@@ -181,9 +225,11 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
     styleTimer = Timer(const Duration(milliseconds: 300), () {
       if (!mounted) return;
       BookStyle style = bookStyle ?? Prefs().bookStyle;
-      webViewController.evaluateJavascript(source: '''
+      webViewController.evaluateJavascript(
+        source: '''
       changeStyle({
         fontSize: ${style.fontSize},
+        footnoteAppearance: ${jsonEncode(Prefs().footnoteAppearance.toMap())},
         spacing: ${style.lineHeight},
         fontWeight: ${style.fontWeight},
         paragraphSpacing: ${style.paragraphSpacing},
@@ -196,17 +242,18 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
         columnThreshold: ${style.columnThreshold},
         writingMode: '${Prefs().writingMode.code}',
         textAlign: '${Prefs().textAlignment.code}',
-        backgroundImage: '$bgimgUrl',
+        backgroundImage: ${jsonEncode(bgimgUrl)},
         bgimgBlur: ${Prefs().bgimg.blur},
         bgimgOpacity: ${Prefs().bgimg.opacity},
         bgimgFit: '${Prefs().bgimgFit.code}',
-        customCSS: `${Prefs().customCSS.replaceAll('`', '\\`')}`,
+        customCSS: ${jsonEncode(Prefs().customCSS)},
         customCSSEnabled: ${Prefs().customCSSEnabled},
         useBookStyles: ${Prefs().useBookStyles},
         headingFontSize: ${style.headingFontSize},
         codeHighlightTheme: '${Prefs().codeHighlightTheme.code}',
       })
-      ''');
+      ''',
+      );
     });
   }
 
@@ -217,82 +264,95 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       isDarkMode: isDarkMode,
       autoAdjust: Prefs().autoAdjustReadingTheme,
     );
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       changeStyle({
-        backgroundImage: '$bgimgUrl',
+        backgroundImage: ${jsonEncode(bgimgUrl)},
         bgimgBlur: ${bgimg.blur},
         bgimgOpacity: ${bgimg.opacity},
         bgimgFit: '${Prefs().bgimgFit.code}',
       })
-    ''');
+    ''',
+    );
   }
 
   void changeReadingRules(ReadingRules readingRules) {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       readingFeatures({
         convertChineseMode: '${readingRules.convertChineseMode.name}',
         bionicReadingMode: ${readingRules.bionicReading},
       })
-    ''');
+    ''',
+    );
   }
 
   void changeFont(FontModel font) {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       changeStyle({
-        fontName: '${font.name}',
-        fontPath: '${font.path}',
+        fontName: ${jsonEncode(font.name)},
+        fontPath: ${jsonEncode(font.path)},
       })
-    ''');
+    ''',
+    );
   }
 
   void changePageTurnStyle(PageTurn pageTurnStyle) {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       changeStyle({
         pageTurnStyle: '${pageTurnStyle.name}',
       })
-    ''');
+    ''',
+    );
   }
 
   void goToHref(String href) =>
-      webViewController.evaluateJavascript(source: "goToHref('$href')");
+      webViewController.evaluateJavascript(source: jsCall('goToHref', [href]));
 
   void goToCfi(String cfi) =>
-      webViewController.evaluateJavascript(source: "goToCfi('$cfi')");
+      webViewController.evaluateJavascript(source: jsCall('goToCfi', [cfi]));
 
   void addAnnotation(BookNote bookNote) {
-    final noteContent =
-        (bookNote.content).replaceAll('\n', ' ').replaceAll("'", "\\'");
-    webViewController.evaluateJavascript(source: '''
-      addAnnotation({
-        id: ${bookNote.id},
-        type: '${bookNote.type}',
-        value: '${bookNote.cfi}',
-        color: '#${bookNote.color}',
-        note: '$noteContent',
-      })
-      ''');
+    webViewController.evaluateJavascript(
+      source: jsCall('addAnnotation', [
+        {
+          'id': bookNote.id,
+          'type': bookNote.type,
+          'value': bookNote.cfi,
+          'color': '#${bookNote.color}',
+          'note': bookNote.content,
+        },
+      ]),
+    );
   }
 
   void addBookmark(BookmarkModel bookmark) {
-    webViewController.evaluateJavascript(source: '''
-      addAnnotation({
-        id: ${bookmark.id},
-        type: 'bookmark',
-        value: '${bookmark.cfi}',
-        color: '#000000',
-        note: 'None',
-      })
-      ''');
+    webViewController.evaluateJavascript(
+      source: jsCall('addAnnotation', [
+        {
+          'id': bookmark.id,
+          'type': 'bookmark',
+          'value': bookmark.cfi,
+          'color': '#000000',
+          'note': 'None',
+        },
+      ]),
+    );
   }
 
   void addBookmarkHere() {
-    webViewController.evaluateJavascript(source: '''
+    webViewController.evaluateJavascript(
+      source: '''
       addBookmarkHere()
-      ''');
+      ''',
+    );
   }
 
-  void removeAnnotation(String cfi) =>
-      webViewController.evaluateJavascript(source: "removeAnnotation('$cfi')");
+  void removeAnnotation(String cfi) => webViewController.evaluateJavascript(
+        source: jsCall('removeAnnotation', [cfi]),
+      );
 
   void clearSearch() {
     ref.read(tocSearchProvider.notifier).clear();
@@ -307,14 +367,16 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
     }
     _clearSearchHighlights();
     ref.read(tocSearchProvider.notifier).start(sanitized);
-    webViewController.evaluateJavascript(source: '''
-      search('$sanitized', {
+    webViewController.evaluateJavascript(
+      source: '''
+      search(${jsonEncode(sanitized)}, {
         'scope': 'book',
         'matchCase': false,
         'matchDiacritics': false,
         'matchWholeWords': false,
       })
-    ''');
+    ''',
+    );
   }
 
   void _clearSearchHighlights() {
@@ -324,7 +386,8 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   Future<void> initTts({String? fromCfi}) async {
     if (fromCfi != null && fromCfi.isNotEmpty) {
       await webViewController.evaluateJavascript(
-          source: "window.ttsFromCfi('$fromCfi')");
+        source: jsCall('window.ttsFromCfi', [fromCfi]),
+      );
     } else {
       await webViewController.evaluateJavascript(source: "window.ttsHere()");
     }
@@ -332,21 +395,29 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
 
   void ttsStop() => webViewController.evaluateJavascript(source: "ttsStop()");
 
-  Future<String> ttsNext() async => (await webViewController
-          .callAsyncJavaScript(functionBody: "return await ttsNext()"))
-      ?.value;
+  Future<String> ttsNext() async =>
+      (await webViewController.callAsyncJavaScript(
+        functionBody: "return await ttsNext()",
+      ))
+          ?.value;
 
-  Future<String> ttsPrev() async => (await webViewController
-          .callAsyncJavaScript(functionBody: "return await ttsPrev()"))
-      ?.value;
+  Future<String> ttsPrev() async =>
+      (await webViewController.callAsyncJavaScript(
+        functionBody: "return await ttsPrev()",
+      ))
+          ?.value;
 
-  Future<String> ttsPrevSection() async => (await webViewController
-          .callAsyncJavaScript(functionBody: "return await ttsPrevSection()"))
-      ?.value;
+  Future<String> ttsPrevSection() async =>
+      (await webViewController.callAsyncJavaScript(
+        functionBody: "return await ttsPrevSection()",
+      ))
+          ?.value;
 
-  Future<String> ttsNextSection() async => (await webViewController
-          .callAsyncJavaScript(functionBody: "return await ttsNextSection()"))
-      ?.value;
+  Future<String> ttsNextSection() async =>
+      (await webViewController.callAsyncJavaScript(
+        functionBody: "return await ttsNextSection()",
+      ))
+          ?.value;
 
   Future<String> ttsPrepare() async =>
       (await webViewController.evaluateJavascript(source: "ttsPrepare()"));
@@ -416,14 +487,10 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   }
 
   Future<String> theChapterContent() async =>
-      await webViewController.evaluateJavascript(
-        source: "theChapterContent()",
-      );
+      await webViewController.evaluateJavascript(source: "theChapterContent()");
 
-  Future<String> previousContent(int count) async =>
-      await webViewController.evaluateJavascript(
-        source: "previousContent($count)",
-      );
+  Future<String> previousContent(int count) async => await webViewController
+      .evaluateJavascript(source: "previousContent($count)");
 
   Future<String> _getCurrentChapterContent({int? maxCharacters}) async {
     final raw = await theChapterContent();
@@ -461,6 +528,442 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       return trimmed.substring(0, maxCharacters);
     }
     return trimmed;
+  }
+
+  bool _editBookIsCurrent(int bookId) =>
+      mounted &&
+      widget.book.id == bookId &&
+      ref.read(currentReadingProvider).isReading &&
+      ref.read(currentReadingProvider).book?.id == bookId;
+
+  Future<String?> _readerEditContext() async {
+    final bookId = widget.book.id;
+    final initialChapter =
+        ref.read(currentReadingProvider).chapterHref ?? chapterHref;
+    String chapterFile(String value) => value.split('#').first;
+    if (!_editBookIsCurrent(bookId)) return null;
+    try {
+      final result = await webViewController.callAsyncJavaScript(
+        functionBody: 'const viewport = $readerAssistantViewportScript; '
+            'const anchor = await captureReaderEditLocation(); return {viewport, anchor};',
+      );
+      if (!_editBookIsCurrent(bookId) ||
+          chapterFile(
+                ref.read(currentReadingProvider).chapterHref ?? chapterHref,
+              ) !=
+              chapterFile(initialChapter)) return null;
+      final bundle = result?.value;
+      if (bundle is! Map) return null;
+      final value = bundle['viewport'];
+      final viewport = value is String ? jsonDecode(value) : value;
+      if (viewport is! Map) return null;
+      String bound(Object? value, int length) {
+        final text = value?.toString() ?? '';
+        return text.substring(0, text.length.clamp(0, length));
+      }
+
+      final anchor = bundle['anchor'];
+      if (anchor is! Map ||
+          chapterFile(anchor['chapterHref']?.toString() ?? '') !=
+              chapterFile(initialChapter)) return null;
+      return jsonEncode({
+        'paragraphHash': anchor['paragraphHash'],
+        'paragraphIndex': anchor['paragraphIndex'],
+        'bookId': bookId,
+        'title': bound(widget.book.title, 140),
+        'chapterHref': bound(initialChapter, 500),
+        'visible': bound(viewport['visible'], 6000),
+        'selection': bound(viewport['selection'], 2000),
+        'visibleTruncated': viewport['visibleTruncated'] == true,
+        'selectionTruncated': viewport['selectionTruncated'] == true,
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>> _applyReaderEdit(
+    Map<String, dynamic> input,
+    bool Function() requestIsCurrent,
+  ) async {
+    final bookId = widget.book.id;
+    final file = File(widget.book.fileFullPath);
+    final plan = ChatGptPlan.instance;
+    final account = plan.active?.id;
+    final revision = plan.requestRevision;
+    final usesPlan = plan.enabled;
+    final provider = Prefs().selectedAiService;
+    bool current() =>
+        requestIsCurrent() &&
+        _editBookIsCurrent(bookId) &&
+        plan.active?.id == account &&
+        plan.requestRevision == revision &&
+        plan.enabled == usesPlan &&
+        Prefs().selectedAiService == provider;
+    if (!current())
+      throw const EpubEditException(
+        'The book or account changed. Nothing was saved.',
+      );
+    final requested = input['chapterHref'];
+    final href = requested is String && requested.isNotEmpty
+        ? requested
+        : ref.read(currentReadingProvider).chapterHref ?? chapterHref;
+    if (href.isEmpty)
+      throw const EpubEditException('The current chapter is not known yet.');
+    if (file.path.toLowerCase().endsWith('.pdf')) {
+      return _applyPdfReaderEdit(file, href, input, current);
+    }
+    final store = EpubEditStore();
+    final snapshot = await store.readChapter(file: file, chapterHref: href);
+    if (!current())
+      throw const EpubEditException(
+        'The book or account changed. Nothing was saved.',
+      );
+    final spec = Map<String, dynamic>.from(input)..remove('chapterHref');
+    final prepared = await webViewController.callAsyncJavaScript(
+      functionBody: 'return await ${jsCall('prepareEpubEdit', [
+            snapshot.xhtml,
+            spec,
+            snapshot.bookIdentifier
+          ])};',
+    );
+    if (!current())
+      throw const EpubEditException(
+        'The book or account changed. Nothing was saved.',
+      );
+    final raw = prepared?.value;
+    if (raw is! Map)
+      throw const EpubEditException('Could not verify the exact phrase.');
+    final edit = Map<String, dynamic>.from(raw);
+    if (edit['editError'] != null) {
+      final message = switch (edit['editError']) {
+        'ambiguous' =>
+          'Multiple exact matches found. Specify context or occurrence; nothing was saved.',
+        'not_found' => 'Exact phrase and context not found. Nothing was saved.',
+        'ruby_overlap' =>
+          'This word already has a ruby hint. Nested hints are not supported.',
+        'word_markup' =>
+          'Internal markup splits this word. Choose a neighboring unsplit word.',
+        'operation_collision' =>
+          'This operationId was already saved with different content.',
+        'missing_context' =>
+          'Provide an exact phrase and surrounding context or a verified paragraphHash.',
+        'occurrence_missing' => 'The specified occurrence does not exist.',
+        'invalid_metadata' =>
+          'Saved annotation metadata is invalid. Nothing was saved.',
+        'invalid_xhtml' =>
+          'Chapter XHTML validation failed. Nothing was saved.',
+        _ => 'Annotation validation failed. Nothing was saved.',
+      };
+      throw EpubEditException(message);
+    }
+    return _savePreparedReaderEdit(
+        store: store,
+        snapshot: snapshot,
+        edit: edit,
+        spec: spec,
+        href: href,
+        current: current);
+  }
+
+  Future<void> _loadPdfHints() async {
+    if (!widget.book.fileFullPath.toLowerCase().endsWith('.pdf')) return;
+    final bookId = widget.book.id;
+    try {
+      final snapshot =
+          await PdfHintStore().read(File(widget.book.fileFullPath));
+      if (!_editBookIsCurrent(bookId)) return;
+      await webViewController.callAsyncJavaScript(
+        functionBody:
+            'return await ${jsCall('setPdfHintPages', [snapshot.pages])};',
+      );
+    } catch (_) {
+      if (mounted)
+        AnxToast.show(
+            'Saved PDF hints could not be loaded. The notes are preserved.');
+    }
+  }
+
+  Future<Map<String, dynamic>> _applyPdfReaderEdit(File file, String href,
+      Map<String, dynamic> input, bool Function() current) async {
+    bool samePage() =>
+        current() &&
+        (ref.read(currentReadingProvider).chapterHref ?? chapterHref) == href;
+    if (!samePage())
+      throw const EpubEditException('The PDF page changed. Nothing was saved.');
+    final store = PdfHintStore();
+    final snapshot = await store.read(file);
+    if (!samePage())
+      throw const EpubEditException('The PDF page changed. Nothing was saved.');
+    final spec = Map<String, dynamic>.from(input)..remove('chapterHref');
+    final prepared = await webViewController.callAsyncJavaScript(
+      functionBody: 'return await ${jsCall('preparePdfEdits', [
+            spec,
+            snapshot.pages[href] ?? [],
+            href
+          ])};',
+    );
+    if (!samePage())
+      throw const EpubEditException('The PDF page changed. Nothing was saved.');
+    final raw = prepared?.value;
+    if (raw is! Map)
+      throw const EpubEditException('Could not verify the PDF text.');
+    if (raw['editError'] != null)
+      throw EpubEditException('${raw['editError']}');
+    final changed = raw['changed'] == true;
+    var displayed = true;
+    if (changed) {
+      if (raw['records'] is! List)
+        throw const EpubEditException('Invalid PDF annotation result.');
+      final pages = <String, dynamic>{...snapshot.pages, href: raw['records']};
+      await store.commit(snapshot: snapshot, pages: pages, isCurrent: samePage);
+      try {
+        if (current()) {
+          final result = await webViewController.callAsyncJavaScript(
+            functionBody: 'return await ${jsCall('setPdfHintPages', [pages])};',
+          );
+          displayed = result?.value == true;
+        } else {
+          displayed = false;
+        }
+      } catch (_) {
+        displayed = false;
+      }
+    }
+    return {
+      'changed': changed,
+      'chapterHref': href,
+      'items': raw['items'],
+      'storage': 'Anx PDF sidecar; original PDF bytes unchanged',
+      'displayed': displayed,
+      if (!displayed)
+        'message': 'Saved. Reopen the PDF to display the annotations.'
+    };
+  }
+
+  Future<Map<String, dynamic>> _savePreparedReaderEdit({
+    required EpubEditStore store,
+    required EpubChapterSnapshot snapshot,
+    required Map<String, dynamic> edit,
+    required Map<String, dynamic> spec,
+    required String href,
+    required bool Function() current,
+    List<EpubImageAsset> images = const [],
+  }) async {
+    final file = snapshot.file;
+    final bookId = widget.book.id;
+    if (edit['unchanged'] == true) {
+      return {
+        'changed': false,
+        'operationId': edit['operationId'] ?? spec['operationId'],
+        'chapterHref': href,
+        'anchor': edit['anchor'],
+        if (edit['items'] is List) 'items': edit['items'],
+      };
+    }
+    if (edit['xhtml'] is! String)
+      throw const EpubEditException(
+        'XHTML validation did not return an updated chapter.',
+      );
+    // Verify we can preserve the reading location before performing any write.
+    final locationResult = await webViewController.callAsyncJavaScript(
+      functionBody: 'return await captureReaderEditLocation();',
+    );
+    if (locationResult?.value is! Map)
+      throw const EpubEditException(
+        'Could not preserve the reading position. Nothing was saved.',
+      );
+    var location = Map<String, dynamic>.from(locationResult!.value as Map);
+    if (!current())
+      throw const EpubEditException(
+        'The book or account changed. Nothing was saved.',
+      );
+    final result = await store.commit(
+      snapshot: snapshot,
+      xhtml: edit['xhtml'] as String,
+      isCurrent: current,
+      images: images,
+    );
+    if (!result.changed)
+      return {
+        'changed': false,
+        'operationId': edit['operationId'] ?? spec['operationId'],
+        'chapterHref': href,
+        'anchor': edit['anchor'],
+        if (edit['items'] is List) 'items': edit['items'],
+      };
+    var restored = false;
+    Completer<bool>? ownedCompletion;
+    try {
+      await BookContentSearchRepository.invalidateBook(bookId);
+    } catch (_) {
+      /* saved already */
+    }
+    try {
+      if (current()) {
+        // Capture again after I/O so reading while the tool worked does not jump
+        // back to the request's earlier viewport. Original Spanish is unchanged.
+        try {
+          final latest = await webViewController.callAsyncJavaScript(
+            functionBody: 'return await captureReaderEditLocation();',
+          );
+          if (latest?.value is Map)
+            location = Map<String, dynamic>.from(latest!.value as Map);
+        } catch (_) {
+          /* use the verified pre-write snapshot */
+        }
+        if (current()) {
+          final completion = Completer<bool>();
+          ownedCompletion = completion;
+          _editReloadLocation = {...location, 'bookId': bookId};
+          _editReloadCompletion = completion;
+          final uri = Uri.encodeComponent(file.path);
+          final url =
+              '${Server().baseUrl}/book/$uri?edit=${DateTime.now().microsecondsSinceEpoch}';
+          await webViewController.loadUrl(
+            urlRequest: URLRequest(
+              url: WebUri(
+                generateUrl(
+                  url,
+                  location['baseCfi'] as String,
+                  hintFilter: ReaderHintFilter.fromJson(Prefs()
+                          .prefs
+                          .getString('readerHintFilter:${widget.book.id}'))
+                      .toRules(),
+                  backgroundColor: backgroundColor,
+                  textColor: textColor,
+                  isDarkMode: Theme.of(context).brightness == Brightness.dark,
+                ),
+              ),
+            ),
+          );
+          restored = await completion.future.timeout(
+            const Duration(seconds: 12),
+            onTimeout: () => false,
+          );
+          if (identical(_editReloadCompletion, completion)) {
+            _editReloadCompletion = null;
+            _editReloadLocation = null;
+          }
+        }
+      }
+    } catch (_) {
+      // Commit already succeeded. Never report a reload failure as a failed write.
+      final pending = ownedCompletion;
+      if (pending != null && !pending.isCompleted) pending.complete(false);
+      if (identical(_editReloadCompletion, pending)) {
+        _editReloadCompletion = null;
+        _editReloadLocation = null;
+      }
+    }
+    return {
+      'changed': true,
+      'operationId': edit['operationId'] ?? spec['operationId'],
+      'chapterHref': href,
+      'anchor': edit['anchor'],
+      if (edit['items'] is List) 'items': edit['items'],
+      'locationRestored': restored,
+      if (!restored)
+        'message':
+            'Annotation saved to EPUB. Please check your reading position.',
+    };
+  }
+
+  Future<Map<String, dynamic>> readerImageOperation(Map<String, dynamic> input,
+      [bool Function()? requestIsCurrent]) async {
+    final plan = ChatGptPlan.instance;
+    final account = plan.active?.id;
+    final revision = plan.requestRevision;
+    final usesPlan = plan.enabled;
+    final provider = Prefs().selectedAiService;
+    final bookId = widget.book.id;
+    bool current() =>
+        (requestIsCurrent?.call() ?? true) &&
+        _editBookIsCurrent(bookId) &&
+        plan.active?.id == account &&
+        plan.requestRevision == revision &&
+        plan.enabled == usesPlan &&
+        Prefs().selectedAiService == provider;
+    final href = input['chapterHref'] as String? ??
+        ref.read(currentReadingProvider).chapterHref ??
+        chapterHref;
+    if (!current() || href.isEmpty)
+      throw const EpubEditException(
+          'Open a book chapter before using image tools.');
+    final handler = ReaderBookImages(
+      file: File(widget.book.fileFullPath),
+      chapterHref: href,
+      vault: BookImageVault('$bookId:$account:$provider'),
+      current: current,
+      generate: (prompt, beforeSend) =>
+          generateBookIllustration(prompt, beforeSend: beforeSend),
+      visibleIndices: () async {
+        if ((ref.read(currentReadingProvider).chapterHref ?? chapterHref)
+                .split('#')
+                .first !=
+            href.split('#').first) return [];
+        final result = await webViewController.callAsyncJavaScript(
+            functionBody: 'return visibleBookImageIndices();');
+        return result?.value is List
+            ? (result!.value as List).whereType<int>().toList()
+            : [];
+      },
+      prepareInsertion: (source, spec) async {
+        final result = await webViewController.callAsyncJavaScript(
+            functionBody: 'return await ${jsCall('prepareBookImageInsertion', [
+              source,
+              spec
+            ])};');
+        if (result?.value is! Map)
+          throw const EpubEditException(
+              'Could not anchor the illustration. No book changes were saved.');
+        return Map<String, dynamic>.from(result!.value as Map);
+      },
+      save: (snapshot, edit, images) => _savePreparedReaderEdit(
+          store: EpubEditStore(),
+          snapshot: snapshot,
+          edit: edit,
+          spec: input,
+          href: href,
+          current: current,
+          images: images),
+    );
+    return handler.handle(input);
+  }
+
+  Future<void> _restoreReaderEditAfterLoad() async {
+    final location = _editReloadLocation;
+    final completion = _editReloadCompletion;
+    if (location == null || completion == null || completion.isCompleted)
+      return;
+    if (!_editBookIsCurrent(location['bookId'] as int)) {
+      completion.complete(false);
+      return;
+    }
+    try {
+      final result = await webViewController.callAsyncJavaScript(
+        functionBody:
+            'return await ${jsCall('restoreReaderEditLocation', [location])};',
+      );
+      if (!completion.isCompleted)
+        completion.complete(
+          result?.value is Map && (result!.value as Map)['restored'] == true,
+        );
+    } catch (_) {
+      if (!completion.isCompleted) completion.complete(false);
+    }
+  }
+
+  void _registerReaderEditBridge() {
+    if (_readerEditHandlers?.bookId != widget.book.id) {
+      _readerEditHandlers = ReaderEditHandlers(
+        bookId: widget.book.id,
+        apply: _applyReaderEdit,
+        context: _readerEditContext,
+        images: (input, current) => readerImageOperation(input, current),
+      );
+    }
+    ref.read(readerEditBridgeProvider.notifier).state = _readerEditHandlers;
   }
 
   void _registerChapterContentBridge() {
@@ -532,10 +1035,7 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       return;
     }
 
-    final opened = await launchUrl(
-      uri,
-      mode: LaunchMode.externalApplication,
-    );
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!opened) {
       AnxLog.warning('Failed to open external link: $link');
     }
@@ -598,15 +1098,18 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   }
 
   Future<void> renderAnnotations(InAppWebViewController controller) async {
-    List<BookNote> annotationList =
-        await bookNoteDao.selectBookNotesByBookId(widget.book.id);
-    String allAnnotations =
-        jsonEncode(annotationList.map((e) => e.toJson()).toList())
-            .replaceAll('\'', '\\\'');
-    controller.evaluateJavascript(source: '''
+    List<BookNote> annotationList = await bookNoteDao.selectBookNotesByBookId(
+      widget.book.id,
+    );
+    String allAnnotations = jsonEncode(
+      annotationList.map((e) => e.toJson()).toList(),
+    );
+    controller.evaluateJavascript(
+      source: '''
      const allAnnotations = $allAnnotations
      renderAnnotations()
-    ''');
+    ''',
+    );
   }
 
   void getThemeColor() {
@@ -625,50 +1128,62 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
 
   Future<void> setHandler(InAppWebViewController controller) async {
     controller.addJavaScriptHandler(
-        handlerName: 'onLoadEnd',
-        callback: (args) {
-          widget.onLoadEnd();
-        });
+      handlerName: 'onReaderBrightnessUiState',
+      callback: (args) {
+        _brightnessUiBlocked = args.isEmpty ||
+            args.first is! Map ||
+            args.first['blocked'] != false;
+      },
+    );
+    controller.addJavaScriptHandler(
+      handlerName: 'onLoadEnd',
+      callback: (args) async {
+        await _restoreReaderEditAfterLoad();
+        await _loadPdfHints();
+        widget.onLoadEnd();
+      },
+    );
 
     controller.addJavaScriptHandler(
-        handlerName: 'onRelocated',
-        callback: (args) {
-          Map<String, dynamic> location = args[0];
-          if (cfi == location['cfi']) return;
-          // if (chapterHref != location['chapterHref']) {
-          //   refreshToc();
-          // }
-          setState(() {
-            cfi = location['cfi'] ?? '';
-            percentage =
-                double.tryParse(location['percentage'].toString()) ?? 0.0;
-            chapterTitle = location['chapterTitle'] ?? '';
-            chapterHref = location['chapterHref'] ?? '';
-            chapterCurrentPage = location['chapterCurrentPage'] ?? 0;
-            chapterTotalPages = location['chapterTotalPages'] ?? 0;
-            bookmarkExists = location['bookmark']['exists'] ?? false;
-            bookmarkCfi = location['bookmark']['cfi'] ?? '';
-            writingMode =
-                WritingModeEnum.fromCode(location['writingMode'] ?? '');
-          });
-          ref.read(currentReadingProvider.notifier).update(
-                cfi: cfi,
-                percentage: percentage,
-                chapterTitle: chapterTitle,
-                chapterHref: chapterHref,
-                chapterCurrentPage: chapterCurrentPage,
-                chapterTotalPages: chapterTotalPages,
-              );
-          widget.updateParent();
-          saveReadingProgress();
-          readingPageKey.currentState?.resetAwakeTimer();
+      handlerName: 'onRelocated',
+      callback: (args) {
+        Map<String, dynamic> location = args[0];
+        if (cfi == location['cfi']) return;
+        // if (chapterHref != location['chapterHref']) {
+        //   refreshToc();
+        // }
+        setState(() {
+          cfi = location['cfi'] ?? '';
+          percentage =
+              double.tryParse(location['percentage'].toString()) ?? 0.0;
+          chapterTitle = location['chapterTitle'] ?? '';
+          chapterHref = location['chapterHref'] ?? '';
+          chapterCurrentPage = location['chapterCurrentPage'] ?? 0;
+          chapterTotalPages = location['chapterTotalPages'] ?? 0;
+          bookmarkExists = location['bookmark']['exists'] ?? false;
+          bookmarkCfi = location['bookmark']['cfi'] ?? '';
+          writingMode = WritingModeEnum.fromCode(location['writingMode'] ?? '');
         });
+        ref.read(currentReadingProvider.notifier).update(
+              cfi: cfi,
+              percentage: percentage,
+              chapterTitle: chapterTitle,
+              chapterHref: chapterHref,
+              chapterCurrentPage: chapterCurrentPage,
+              chapterTotalPages: chapterTotalPages,
+            );
+        widget.updateParent();
+        saveReadingProgress();
+        readingPageKey.currentState?.resetAwakeTimer();
+      },
+    );
     controller.addJavaScriptHandler(
-        handlerName: 'onClick',
-        callback: (args) {
-          Map<String, dynamic> location = args[0];
-          onClick(location);
-        });
+      handlerName: 'onClick',
+      callback: (args) {
+        Map<String, dynamic> location = args[0];
+        onClick(location);
+      },
+    );
     controller.addJavaScriptHandler(
       handlerName: 'onExternalLink',
       callback: (args) async {
@@ -677,94 +1192,98 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       },
     );
     controller.addJavaScriptHandler(
-        handlerName: 'onSetToc',
-        callback: (args) {
-          List<dynamic> t = args[0];
-          final toc = t.map((i) => TocItem.fromJson(i)).toList();
-          ref.read(bookTocProvider.notifier).setToc(toc);
-        });
+      handlerName: 'onSetToc',
+      callback: (args) {
+        List<dynamic> t = args[0];
+        final toc = t.map((i) => TocItem.fromJson(i)).toList();
+        ref.read(bookTocProvider.notifier).setToc(toc);
+      },
+    );
     controller.addJavaScriptHandler(
-        handlerName: 'onSelectionEnd',
-        callback: (args) {
-          removeOverlay();
-          Map<String, dynamic> location = args[0];
-          String cfi = location['cfi'];
-          String text = location['text'];
-          bool footnote = location['footnote'];
-          final rawContextText = location['contextText']?.toString();
-          _lastSelectionContextText =
-              (rawContextText?.trim().isEmpty ?? true) ? null : rawContextText;
-          double left = (location['pos']['left'] as num).toDouble();
-          double top = (location['pos']['top'] as num).toDouble();
-          double right = (location['pos']['right'] as num).toDouble();
-          double bottom = (location['pos']['bottom'] as num).toDouble();
-          showContextMenu(
-            context,
-            left,
-            top,
-            right,
-            bottom,
-            text,
-            cfi,
-            null,
-            footnote,
-            writingMode.isVertical ? Axis.vertical : Axis.horizontal,
-            contextText: _lastSelectionContextText,
-          );
-        });
+      handlerName: 'onSelectionEnd',
+      callback: (args) {
+        removeOverlay();
+        Map<String, dynamic> location = args[0];
+        String cfi = location['cfi'];
+        String text = location['text'];
+        bool footnote = location['footnote'];
+        final rawContextText = location['contextText']?.toString();
+        _lastSelectionContextText =
+            (rawContextText?.trim().isEmpty ?? true) ? null : rawContextText;
+        double left = (location['pos']['left'] as num).toDouble();
+        double top = (location['pos']['top'] as num).toDouble();
+        double right = (location['pos']['right'] as num).toDouble();
+        double bottom = (location['pos']['bottom'] as num).toDouble();
+        showContextMenu(
+          context,
+          left,
+          top,
+          right,
+          bottom,
+          text,
+          cfi,
+          null,
+          footnote,
+          writingMode.isVertical ? Axis.vertical : Axis.horizontal,
+          contextText: _lastSelectionContextText,
+        );
+      },
+    );
     controller.addJavaScriptHandler(
-        handlerName: 'onSelectionCleared',
-        callback: (args) {
-          if (_selectionClearLocked) {
-            _selectionClearPending = true;
+      handlerName: 'onSelectionCleared',
+      callback: (args) {
+        if (_selectionClearLocked) {
+          _selectionClearPending = true;
+          return;
+        }
+        _lastSelectionContextText = null;
+        removeOverlay();
+      },
+    );
+    controller.addJavaScriptHandler(
+      handlerName: 'onAnnotationClick',
+      callback: (args) {
+        Map<String, dynamic> annotation = args[0];
+
+        if (annotation['annotation'] == null) {
+          // Check if TTS is active and the click is on the currently read text
+          final currentTtsState = TtsHandler().ttsStateNotifier.value;
+          if (currentTtsState == TtsStateEnum.playing ||
+              currentTtsState == TtsStateEnum.paused) {
+            if (currentTtsState == TtsStateEnum.playing) {
+              audioHandler.pause();
+            } else {
+              audioHandler.play();
+            }
             return;
           }
-          _lastSelectionContextText = null;
-          removeOverlay();
-        });
-    controller.addJavaScriptHandler(
-        handlerName: 'onAnnotationClick',
-        callback: (args) {
-          Map<String, dynamic> annotation = args[0];
+        }
 
-          if (annotation['annotation'] == null) {
-            // Check if TTS is active and the click is on the currently read text
-            final currentTtsState = TtsHandler().ttsStateNotifier.value;
-            if (currentTtsState == TtsStateEnum.playing ||
-                currentTtsState == TtsStateEnum.paused) {
-              if (currentTtsState == TtsStateEnum.playing) {
-                audioHandler.pause();
-              } else {
-                audioHandler.play();
-              }
-              return;
-            }
-          }
-
-          int id = annotation['annotation']['id'];
-          String cfi = annotation['annotation']['value'];
-          String note = annotation['annotation']['note'];
-          final rawContextText = annotation['contextText']?.toString();
-          _lastSelectionContextText =
-              (rawContextText?.trim().isEmpty ?? true) ? null : rawContextText;
-          double left = (annotation['pos']['left'] as num).toDouble();
-          double top = (annotation['pos']['top'] as num).toDouble();
-          double right = (annotation['pos']['right'] as num).toDouble();
-          double bottom = (annotation['pos']['bottom'] as num).toDouble();
-          showContextMenu(
-            context,
-            left,
-            top,
-            right,
-            bottom,
-            note,
-            cfi,
-            id,
-            false,
-            writingMode.isVertical ? Axis.vertical : Axis.horizontal,
-            contextText: _lastSelectionContextText,
-          );
-        });
+        int id = annotation['annotation']['id'];
+        String cfi = annotation['annotation']['value'];
+        String note = annotation['annotation']['note'];
+        final rawContextText = annotation['contextText']?.toString();
+        _lastSelectionContextText =
+            (rawContextText?.trim().isEmpty ?? true) ? null : rawContextText;
+        double left = (annotation['pos']['left'] as num).toDouble();
+        double top = (annotation['pos']['top'] as num).toDouble();
+        double right = (annotation['pos']['right'] as num).toDouble();
+        double bottom = (annotation['pos']['bottom'] as num).toDouble();
+        showContextMenu(
+          context,
+          left,
+          top,
+          right,
+          bottom,
+          note,
+          cfi,
+          id,
+          false,
+          writingMode.isVertical ? Axis.vertical : Axis.horizontal,
+          contextText: _lastSelectionContextText,
+        );
+      },
+    );
     controller.addJavaScriptHandler(
       handlerName: 'onSearch',
       callback: (args) {
@@ -803,12 +1322,12 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       callback: (args) {
         String image = args[0];
         Navigator.push(
-            context,
-            MaterialPageRoute(
-                builder: (context) => ImageViewer(
-                      image: image,
-                      bookName: widget.book.title,
-                    )));
+          context,
+          MaterialPageRoute(
+            builder: (context) =>
+                ImageViewer(image: image, bookName: widget.book.title),
+          ),
+        );
       },
     );
     controller.addJavaScriptHandler(
@@ -833,9 +1352,9 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
         String content = detail['content'];
 
         if (remove) {
-          ref.read(bookmarkProvider(widget.book.id).notifier).removeBookmark(
-                cfi: cfi,
-              );
+          ref
+              .read(bookmarkProvider(widget.book.id).notifier)
+              .removeBookmark(cfi: cfi);
           bookmarkCfi = '';
           bookmarkExists = false;
         } else {
@@ -869,8 +1388,12 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
           final from = Prefs().fullTextTranslateFrom;
           final to = Prefs().fullTextTranslateTo;
 
-          return await service.provider
-              .translateTextOnly(text, from, to, isFullText: true);
+          return await service.provider.translateTextOnly(
+            text,
+            from,
+            to,
+            isFullText: true,
+          );
         } catch (e) {
           AnxLog.severe('Translation error: $e');
           return 'Translation error: $e';
@@ -881,11 +1404,14 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
 
   Future<void> onWebViewCreated(InAppWebViewController controller) async {
     if (AnxPlatform.isAndroid) {
-      await InAppWebViewController.setWebContentsDebuggingEnabled(true);
+      await InAppWebViewController.setWebContentsDebuggingEnabled(kDebugMode);
     }
     webViewController = controller;
     setHandler(controller);
+    _brightnessUiBlocked = true;
+    await controller.evaluateJavascript(source: readerBrightnessGateScript);
     _registerChapterContentBridge();
+    _registerReaderEditBridge();
 
     // Initialize translation mode based on book-specific settings
     Future.delayed(const Duration(milliseconds: 300), () {
@@ -945,8 +1471,10 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
         duration: const Duration(milliseconds: 600),
         vsync: this,
       );
-      _animation =
-          Tween<double>(begin: 1.0, end: 0.0).animate(_animationController!);
+      _animation = Tween<double>(
+        begin: 1.0,
+        end: 0.0,
+      ).animate(_animationController!);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _animationController!.forward();
       });
@@ -972,6 +1500,20 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
 
   @override
   void dispose() {
+    final completion = _editReloadCompletion;
+    if (completion != null && !completion.isCompleted)
+      completion.complete(false);
+    final handlers = _readerEditHandlers;
+    final container = ProviderScope.containerOf(context, listen: false);
+    Future.microtask(() {
+      try {
+        if (identical(container.read(readerEditBridgeProvider), handlers)) {
+          container.read(readerEditBridgeProvider.notifier).state = null;
+        }
+      } catch (_) {
+        /* the whole ProviderScope may already be disposed */
+      }
+    });
     _scrollDebounceTimer?.cancel();
     _animationController?.dispose();
     saveReadingProgress();
@@ -1002,14 +1544,15 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       minimumSize: const Size(0, 32),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(32),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(32)),
     );
 
     // Helper method to create history navigation buttons
     Widget createHistoryButton(
-        IconData icon, String label, VoidCallback onPressed) {
+      IconData icon,
+      String label,
+      VoidCallback onPressed,
+    ) {
       return TextButton.icon(
         icon: Icon(icon, size: 18, color: buttonColor),
         label: Text(label, style: TextStyle(color: buttonColor, fontSize: 14)),
@@ -1022,25 +1565,27 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
     final List<Widget> buttons = [];
 
     if (canGoBack) {
-      buttons.add(createHistoryButton(
-        Icons.arrow_back,
-        l10n.historyBack,
-        backHistory,
-      ));
+      buttons.add(
+        createHistoryButton(Icons.arrow_back, l10n.historyBack, backHistory),
+      );
     }
 
-    buttons.add(createHistoryButton(
-      Icons.close,
-      l10n.historyClose,
-      () => setState(() => showHistory = false),
-    ));
+    buttons.add(
+      createHistoryButton(
+        Icons.close,
+        l10n.historyClose,
+        () => setState(() => showHistory = false),
+      ),
+    );
 
     if (canGoForward) {
-      buttons.add(createHistoryButton(
-        Icons.arrow_forward,
-        l10n.historyForward,
-        forwardHistory,
-      ));
+      buttons.add(
+        createHistoryButton(
+          Icons.arrow_forward,
+          l10n.historyForward,
+          forwardHistory,
+        ),
+      );
     }
     return Align(
       alignment: Alignment.bottomCenter,
@@ -1053,20 +1598,16 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
             child: Container(
               height: 32,
               decoration: BoxDecoration(
-                color: Theme.of(context)
-                    .colorScheme
-                    .surfaceContainer
-                    .withAlpha(123),
+                color: Theme.of(
+                  context,
+                ).colorScheme.surfaceContainer.withAlpha(123),
                 borderRadius: BorderRadius.circular(32),
                 border: Border.all(
                   color: Theme.of(context).colorScheme.outline,
                   width: 0.5,
                 ),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: buttons,
-              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: buttons),
             ),
           ),
         ),
@@ -1099,42 +1640,45 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
         style: textStyle,
       );
 
-      final bookProgressWidget =
-          Text('${(percentage * 100).toStringAsFixed(2)}%', style: textStyle);
+      final bookProgressWidget = Text(
+        '${(percentage * 100).toStringAsFixed(2)}%',
+        style: textStyle,
+      );
 
       final timeWidget = MinuteClock(textStyle: textStyle);
 
       final batteryWidget = FutureBuilder(
-          future: Battery().batteryLevel,
-          builder: (context, snapshot) {
-            if (snapshot.hasData) {
-              return Stack(
-                alignment: Alignment.center,
-                children: [
-                  Padding(
-                    padding: EdgeInsets.fromLTRB(
-                        0, (textStyle.fontSize ?? 10) * 0.08, 2, 0),
-                    child: Text('${snapshot.data}', style: batteryTextStyle),
+        future: Battery().batteryLevel,
+        builder: (context, snapshot) {
+          if (snapshot.hasData) {
+            return Stack(
+              alignment: Alignment.center,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    0,
+                    (textStyle.fontSize ?? 10) * 0.08,
+                    2,
+                    0,
                   ),
-                  Icon(
-                    HeroIcons.battery_0,
-                    size: batteryIconSize,
-                    color: iconColor,
-                  ),
-                ],
-              );
-            } else {
-              return const SizedBox();
-            }
-          });
+                  child: Text('${snapshot.data}', style: batteryTextStyle),
+                ),
+                Icon(
+                  HeroIcons.battery_0,
+                  size: batteryIconSize,
+                  color: iconColor,
+                ),
+              ],
+            );
+          } else {
+            return const SizedBox();
+          }
+        },
+      );
 
       Widget batteryAndTimeWidget() => Row(
             mainAxisSize: MainAxisSize.min,
-            children: [
-              batteryWidget,
-              const SizedBox(width: 5),
-              timeWidget,
-            ],
+            children: [batteryWidget, const SizedBox(width: 5), timeWidget],
           );
 
       switch (readingInfoEnum) {
@@ -1209,7 +1753,10 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   }
 
   Widget buildWebviewWithIOSWorkaround(
-      BuildContext context, String url, String initialCfi) {
+    BuildContext context,
+    String url,
+    String initialCfi,
+  ) {
     final webView = InAppWebView(
       webViewEnvironment: webViewEnvironment,
       initialUrlRequest: URLRequest(
@@ -1217,6 +1764,10 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
           generateUrl(
             url,
             initialCfi,
+            hintFilter: ReaderHintFilter.fromJson(Prefs()
+                    .prefs
+                    .getString('readerHintFilter:${widget.book.id}'))
+                .toRules(),
             backgroundColor: backgroundColor,
             textColor: textColor,
             isDarkMode: Theme.of(context).brightness == Brightness.dark,
@@ -1230,7 +1781,17 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
     );
 
     if (!AnxPlatform.isIOS) {
-      return SizedBox.expand(child: webView);
+      return SizedBox.expand(
+        child: ReaderBrightnessGesture(
+          enabled: Prefs().readerBrightnessGesture,
+          canStart: () =>
+              _isTopOfNavigationStack &&
+              !_brightnessUiBlocked &&
+              contextMenuEntry == null &&
+              (readingPageKey.currentState?.bottomBarOffstage ?? true),
+          child: webView,
+        ),
+      );
     }
 
     return SizedBox.expand(
@@ -1252,7 +1813,7 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
   @override
   Widget build(BuildContext context) {
     String uri = Uri.encodeComponent(widget.book.fileFullPath);
-    String url = 'http://127.0.0.1:${Server().port}/book/$uri';
+    String url = '${Server().baseUrl}/book/$uri';
     String initialCfi = widget.cfi ?? widget.book.lastReadPosition;
 
     return Listener(
@@ -1268,11 +1829,14 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
             if (showHistory) _buildHistoryCapsule(),
             if (Prefs().openBookAnimation)
               SizedBox.expand(
-                  child: IgnorePointer(
-                ignoring: true,
-                child: FadeTransition(
-                    opacity: _animation!, child: BookCover(book: widget.book)),
-              )),
+                child: IgnorePointer(
+                  ignoring: true,
+                  child: FadeTransition(
+                    opacity: _animation!,
+                    child: BookCover(book: widget.book),
+                  ),
+                ),
+              ),
           ],
         ),
       ),

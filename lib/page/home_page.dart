@@ -43,7 +43,8 @@ class HomePage extends ConsumerStatefulWidget {
   ConsumerState<ConsumerStatefulWidget> createState() => _HomePageState();
 }
 
-class _HomePageState extends ConsumerState<HomePage> {
+class _HomePageState extends ConsumerState<HomePage>
+    with WidgetsBindingObserver {
   String _currentTab = 'bookshelf';
 
   bool? _expanded;
@@ -51,7 +52,19 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => initAnx());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) checkUpdate(false);
   }
 
   Future<void> _checkWindowsWebview() async {
@@ -67,9 +80,11 @@ class _HomePageState extends ConsumerState<HomePage> {
             TextButton(
               onPressed: () => {
                 launchUrl(
-                    Uri.parse(
-                        'https://developer.microsoft.com/en-us/microsoft-edge/webview2'),
-                    mode: LaunchMode.externalApplication)
+                  Uri.parse(
+                    'https://developer.microsoft.com/en-us/microsoft-edge/webview2',
+                  ),
+                  mode: LaunchMode.externalApplication,
+                ),
               },
               child: Text(L10n.of(context).webview2Install),
             ),
@@ -79,7 +94,8 @@ class _HomePageState extends ConsumerState<HomePage> {
     } else {
       webViewEnvironment = await WebViewEnvironment.create(
         settings: WebViewEnvironmentSettings(
-            userDataFolder: (await getAnxTempDir()).path),
+          userDataFolder: (await getAnxTempDir()).path,
+        ),
       );
     }
   }
@@ -134,35 +150,36 @@ class _HomePageState extends ConsumerState<HomePage> {
       {
         'icon': EvaIcons.book_open,
         'label': L10n.of(context).navBarBookshelf,
-        'identifier': 'bookshelf'
+        'identifier': 'bookshelf',
       },
       if (Prefs().bottomNavigatorShowStatistics)
         {
           'icon': Icons.show_chart,
           'label': L10n.of(context).navBarStatistics,
-          'identifier': 'statistics'
+          'identifier': 'statistics',
         },
       if (Prefs().bottomNavigatorShowAI && EnvVar.enableAIFeature)
         {
           'icon': Icons.auto_awesome,
           'label': L10n.of(context).navBarAI,
-          'identifier': 'ai'
+          'identifier': 'ai',
         },
       if (Prefs().bottomNavigatorShowNote)
         {
           'icon': Icons.note,
           'label': L10n.of(context).navBarNotes,
-          'identifier': 'notes'
+          'identifier': 'notes',
         },
       {
         'icon': EvaIcons.settings_2,
         'label': L10n.of(context).navBarSettings,
-        'identifier': 'settings'
+        'identifier': 'settings',
       },
     ];
 
-    int currentIndex = navBarItems
-        .indexWhere((element) => element['identifier'] == _currentTab);
+    int currentIndex = navBarItems.indexWhere(
+      (element) => element['identifier'] == _currentTab,
+    );
     if (currentIndex == -1) {
       currentIndex = 0;
       _currentTab = 'bookshelf';
@@ -189,7 +206,9 @@ class _HomePageState extends ConsumerState<HomePage> {
       VibrationService.heavy();
       if (navBarItems[index]['identifier'] == 'ai' && !fromRail) {
         showCupertinoSheet(
-            context: context, builder: (context) => const AiPage());
+          context: context,
+          builder: (context) => const AiPage(),
+        );
         return;
       }
       setState(() {
@@ -216,6 +235,10 @@ class _HomePageState extends ConsumerState<HomePage> {
         _expanded ??= constraints.maxWidth > 1000;
         if (constraints.maxWidth > 600) {
           return Scaffold(
+            floatingActionButton: const Padding(
+              padding: EdgeInsets.only(bottom: 80),
+              child: PersonalUpdateButton(),
+            ),
             extendBody: true,
             body: Row(
               children: [
@@ -265,6 +288,10 @@ class _HomePageState extends ConsumerState<HomePage> {
             currentIndex = 0;
           }
           return Scaffold(
+            floatingActionButton: const Padding(
+              padding: EdgeInsets.only(bottom: 80),
+              child: PersonalUpdateButton(),
+            ),
             extendBody: true,
             body: BottomBar(
               width: 330,
@@ -287,10 +314,9 @@ class _HomePageState extends ConsumerState<HomePage> {
                   child: Container(
                     height: 64,
                     decoration: BoxDecoration(
-                      color: Theme.of(context)
-                          .colorScheme
-                          .surfaceContainer
-                          .withAlpha(123),
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainer.withAlpha(123),
                       borderRadius: BorderRadius.circular(32),
                       border: Border.all(
                         color: Theme.of(context).colorScheme.outline,

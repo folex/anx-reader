@@ -1,3 +1,4 @@
+import 'package:anx_reader/widgets/extensions/extensions_page.dart';
 import 'package:anx_reader/widgets/settings/chatgpt_plan_card.dart';
 import 'package:anx_reader/config/shared_preference_provider.dart';
 import 'package:anx_reader/enums/ai_prompts.dart';
@@ -215,6 +216,13 @@ class _AISettingsState extends ConsumerState<AISettings> {
       SettingsSection(
         title: Text(L10n.of(context).settingsAiServices),
         tiles: [
+          SettingsTile.navigation(
+            leading: const Icon(Icons.extension_outlined),
+            title: const Text('Extensions'),
+            description: const Text('Install AI tools and manage their permissions'),
+            onPressed: (context) => Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const ExtensionsPage())),
+          ),
           CustomSettingsTile(child: Padding(padding: const EdgeInsets.all(16), child: ChatGptPlanCard())),
           SettingsTile.navigation(
             title: Text(l10n.settingsAiProviders),

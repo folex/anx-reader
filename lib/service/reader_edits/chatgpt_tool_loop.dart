@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:anx_reader/service/chatgpt/protocol.dart';
 
@@ -58,46 +59,66 @@ Stream<String> chatGptToolLoop({
     final items = <String, Map<String, dynamic>>{};
     var retainedItemBytes = 0;
     var roundText = '';
-    await for (final event in request(input, specs)) {
-      guard();
-      switch (event['type']) {
-        case 'response.output_text.delta':
-          final delta = event['delta'];
-          if (delta is String) {
-            roundText += delta;
-            if (visible.length + roundText.length > 64000)
-              throw const ChatGptError('Response is too long.');
-            yield visible + roundText;
-          }
-        case 'response.output_item.done':
-          final item = event['item'];
-          if (item is Map && item['id'] is String) {
-            final encodedSize = utf8.encode(jsonEncode(item)).length;
-            final previous = items[item['id']];
-            final previousSize =
-                previous == null ? 0 : utf8.encode(jsonEncode(previous)).length;
-            retainedItemBytes += encodedSize - previousSize;
-            if (retainedItemBytes > 2 * 1024 * 1024 ||
-                previous == null && items.length >= 256) {
+    for (var attempt = 0;; attempt++) {
+      completed = null;
+      items.clear();
+      retainedItemBytes = 0;
+      roundText = '';
+      try {
+        responseEvents:
+        await for (final event in request(input, specs)) {
+          guard();
+          switch (event['type']) {
+            case 'response.output_text.delta':
+              final delta = event['delta'];
+              if (delta is String) {
+                roundText += delta;
+                if (visible.length + roundText.length > 64000)
+                  throw const ChatGptError('Response is too long.');
+                yield visible + roundText;
+              }
+            case 'response.output_item.done':
+              final item = event['item'];
+              if (item is Map && item['id'] is String) {
+                final encodedSize = utf8.encode(jsonEncode(item)).length;
+                final previous = items[item['id']];
+                final previousSize = previous == null
+                    ? 0
+                    : utf8.encode(jsonEncode(previous)).length;
+                retainedItemBytes += encodedSize - previousSize;
+                if (retainedItemBytes > 2 * 1024 * 1024 ||
+                    previous == null && items.length >= 256) {
+                  throw const ChatGptError(
+                    'Tool response is too large.',
+                  );
+                }
+                items[item['id'] as String] = Map<String, dynamic>.from(item);
+              }
+            case 'response.completed':
+              final value = event['response'];
+              completed = value is Map
+                  ? Map<String, dynamic>.from(value)
+                  : <String, dynamic>{};
+              break responseEvents;
+            case 'response.failed':
+              throw chatGptApiError(event['response']);
+            case 'response.incomplete':
               throw const ChatGptError(
-                'Tool response is too large.',
+                'ChatGPT did not finish the response. Try again.',
               );
-            }
-            items[item['id'] as String] = Map<String, dynamic>.from(item);
+            case 'error':
+              throw chatGptApiError({'error': event});
           }
-        case 'response.completed':
-          final value = event['response'];
-          completed = value is Map
-              ? Map<String, dynamic>.from(value)
-              : <String, dynamic>{};
-        case 'response.failed':
-          throw chatGptApiError(event['response']);
-        case 'response.incomplete':
-          throw const ChatGptError(
-            'ChatGPT did not finish the response. Try again.',
-          );
-        case 'error':
-          throw chatGptApiError({'error': event});
+        }
+        break;
+      } on IOException catch (error) {
+        if (error is! HttpException && error is! SocketException) rethrow;
+        guard();
+        if (attempt >= 1) rethrow;
+        // Retry only generation of this response. Previously saved tool
+        // outputs remain in input, and no pending call executes before the
+        // retried response completes. Never replay a book edit here.
+        if (roundText.isNotEmpty) yield visible;
       }
     }
     guard();

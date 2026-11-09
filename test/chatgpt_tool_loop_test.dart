@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:anx_reader/service/chatgpt/protocol.dart';
 import 'package:anx_reader/service/reader_edits/chatgpt_tool_loop.dart';
@@ -51,6 +52,89 @@ ChatGptToolBinding binding(Future<String> Function(Map<String, dynamic>) run) =>
     );
 
 void main() {
+  test('a completed tool response does not wait for a broken HTTP stream tail',
+      () async {
+    var requests = 0, executions = 0;
+    final output = await chatGptToolLoop(
+      initialInput: [],
+      tools: [
+        binding((_) async {
+          executions++;
+          return 'saved';
+        })
+      ],
+      isCurrent: () => true,
+      request: (_, __) async* {
+        yield* complete(requests++ == 0 ? [call('saved')] : [message('done')]);
+        throw const HttpException('stream closed after completed');
+      },
+    ).toList();
+    expect(executions, 1);
+    expect(requests, 2);
+    expect(output.last, 'done');
+  });
+  test(
+      'interrupted generation retries with saved outputs without replaying edits',
+      () async {
+    var requests = 0;
+    final edits = <String>[];
+    final output = await chatGptToolLoop(
+      initialInput: [],
+      tools: [
+        binding((args) async {
+          edits.add(args['quote'] as String);
+          return 'saved';
+        })
+      ],
+      isCurrent: () => true,
+      request: (input, _) async* {
+        final round = requests++;
+        if (round == 0) {
+          yield* complete([call('first')]);
+        } else if (round == 1) {
+          expect(input.last['call_id'], 'first');
+          yield {'type': 'response.output_text.delta', 'delta': 'unfinished'};
+          yield {
+            'type': 'response.output_item.done',
+            'item': call('discarded', args: '{"quote":"never"}')
+          };
+          throw const HttpException('connection closed');
+        } else if (round == 2) {
+          expect(input.last['call_id'], 'first');
+          yield* complete([call('second', args: '{"quote":"amor"}')]);
+        } else {
+          yield* complete([message('done')], delta: 'done');
+        }
+      },
+    ).toList();
+    expect(edits, ['ira', 'amor']);
+    expect(requests, 4);
+    expect(output.last, 'done');
+  });
+  test('transport recovery is bounded and rejects a changed book', () async {
+    for (final changeScope in [false, true]) {
+      var current = true, requests = 0, executions = 0;
+      final output = chatGptToolLoop(
+        initialInput: [],
+        tools: [
+          binding((_) async {
+            executions++;
+            return 'saved';
+          })
+        ],
+        isCurrent: () => current,
+        request: (_, __) async* {
+          requests++;
+          if (changeScope) current = false;
+          throw const SocketException('connection lost');
+        },
+      );
+      await expectLater(output.toList(),
+          throwsA(changeScope ? isA<ChatGptError>() : isA<SocketException>()));
+      expect(requests, changeScope ? 1 : 2);
+      expect(executions, 0);
+    }
+  });
   test(
       'successful saved annotations get a confirmation when model final text is empty',
       () async {

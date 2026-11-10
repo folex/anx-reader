@@ -149,7 +149,13 @@ class ReaderVoiceBridge(private val activity: Activity, engine: FlutterEngine) {
                 if (text.isBlank()) {
                     if (terminal) finish(id, "error", mapOf("code" to if (continuous) "continuous_ended" else "no_match"))
                 }
-                else { phase("final"); finish(id, "transcript", mapOf("text" to text)) }
+                else {
+                    phase("final")
+                    // A segmented session keeps the same quiet PCM pipe open
+                    // through thinking/playback; never restart it per sentence.
+                    if (continuous && !terminal) emit(id, "transcript", mapOf("text" to text, "continuous" to true))
+                    else finish(id, "transcript", mapOf("text" to text))
+                }
             }
             override fun onPartialResults(partialResults: Bundle?) {
                 if (current()) emit(id, "partial", mapOf("text" to (partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.take(4000) ?: "")))
@@ -170,7 +176,7 @@ class ReaderVoiceBridge(private val activity: Activity, engine: FlutterEngine) {
         }
         recognizer.startListening(intent)
         audioPipe?.start()
-        emit(id, "starting")
+        emit(id, "starting", mapOf("continuous" to continuous, "echoCancellation" to (audioPipe?.echoCancellation == true)))
     }
     private fun speechError(code: Int): String = when (code) {
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "permission_denied"

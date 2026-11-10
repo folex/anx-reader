@@ -3,6 +3,8 @@ package com.anxcye.anx_reader
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.speech.RecognizerIntent
@@ -21,11 +23,14 @@ class AssistantAudioPipe(
     private val output = ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1])
     private val recorder: AudioRecord
     private var worker: Thread? = null
+    private var echo: AcousticEchoCanceler? = null
+    private var noise: NoiseSuppressor? = null
+    val echoCancellation: Boolean get() = echo?.enabled == true
     init {
         try {
             val minimum = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             require(minimum > 0)
-            recorder = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            recorder = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(16000).setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
                 .setBufferSizeInBytes(maxOf(minimum * 2, 6400)).build()
@@ -33,6 +38,12 @@ class AssistantAudioPipe(
                 recorder.release()
                 error("AudioRecord initialization failed")
             }
+            echo = runCatching {
+                if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(recorder.audioSessionId)?.apply { enabled = true } else null
+            }.getOrNull()
+            noise = runCatching {
+                if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(recorder.audioSessionId)?.apply { enabled = true } else null
+            }.getOrNull()
         } catch (error: Exception) {
             runCatching { output.close() }; runCatching { descriptors[0].close() }
             throw error
@@ -66,6 +77,7 @@ class AssistantAudioPipe(
             } finally {
                 synchronized(lifecycle) {
                     runCatching { recorder.stop() }; runCatching { recorder.release() }
+                    runCatching { echo?.release() }; runCatching { noise?.release() }
                 }
                 runCatching { output.close() }
             }
@@ -77,7 +89,10 @@ class AssistantAudioPipe(
             if (!closed.compareAndSet(false, true)) return
             // Serialized with startRecording: capture cannot begin after cancel.
             runCatching { recorder.stop() }
-            if (worker == null) runCatching { recorder.release() }
+            if (worker == null) {
+                runCatching { recorder.release() }
+                runCatching { echo?.release() }; runCatching { noise?.release() }
+            }
         }
         // Unblock a read AND a backpressured write; never join an audio thread on UI.
         runCatching { output.close() }; runCatching { descriptors[0].close() }

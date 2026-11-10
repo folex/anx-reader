@@ -1,3 +1,4 @@
+import 'package:anx_reader/service/voice/assistant_activity.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -52,6 +53,36 @@ ChatGptToolBinding binding(Future<String> Function(Map<String, dynamic>) run) =>
     );
 
 void main() {
+  test('activity reports actual tool execution and socket recovery', () async {
+    final states = <AssistantActivity>[];
+    var requests = 0;
+    var calls = 0;
+    await chatGptToolLoop(
+      initialInput: [],
+      tools: [
+        binding((_) async {
+          calls++;
+          expect(states.last, AssistantActivity.tools);
+          return 'saved';
+        })
+      ],
+      isCurrent: () => true,
+      onActivity: states.add,
+      request: (_, __) async* {
+        if (requests++ == 0) throw const SocketException('lost');
+        yield* complete(requests == 2 ? [call('one')] : [message('done')]);
+      },
+    ).toList();
+    expect(calls, 1);
+    expect(
+        states,
+        containsAllInOrder([
+          AssistantActivity.thinking,
+          AssistantActivity.disconnected,
+          AssistantActivity.tools,
+          AssistantActivity.thinking
+        ]));
+  });
   test('a completed tool response does not wait for a broken HTTP stream tail',
       () async {
     var requests = 0, executions = 0;

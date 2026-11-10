@@ -96,6 +96,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
   int _assistantRevision = 0;
   String? _assistantDraft;
   String? _lastAssistantScope;
+  String? _voicePlaybackScope, _voicePlaybackContext;
 
   String _assistantIdentity() {
     if (!mounted) return 'reader-disposed';
@@ -172,12 +173,16 @@ class ReadingPageState extends ConsumerState<ReadingPage>
           .evaluateJavascript(source: readerAssistantViewportScript);
     } catch (_) {}
     final reading = ref.read(currentReadingProvider);
-    return buildReaderTutorContext(
+    final context = buildReaderTutorContext(
       title: _book.title,
       chapter: reading.chapterTitle ?? '',
       viewport: viewport,
       selectionFallback: reading.cfi == _selectionCfi ? _aiSelectedText : null,
     );
+    final playback =
+        _voicePlaybackScope == _assistantScope() ? _voicePlaybackContext : null;
+    _voicePlaybackContext = null;
+    return [context, if (playback != null) playback].join('\n\n');
   }
 
   Future<void> _startBookVoice(String language) async {
@@ -325,6 +330,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
             transientContext: extra,
             requestOwner: _assistantRequestOwner,
             assistantMode: true,
+            onActivity: _assistantTurn.activityListener,
           )
           .map((messages) {
         final answers = messages.whereType<AIChatMessage>();
@@ -343,8 +349,17 @@ class ReadingPageState extends ConsumerState<ReadingPage>
     );
     _assistant = AssistantSession(
       currentScope: _assistantScope,
-      cancelQuestion: () {
-        if (_voiceOwnsTurn) _assistantTurn.cancel();
+      cancelQuestion: () async {
+        if (_voiceOwnsTurn) await _assistantTurn.cancel();
+      },
+      onInterrupted: (heard) {
+        _voicePlaybackScope = _assistantScope();
+        _voicePlaybackContext =
+            'Voice playback status: the preceding spoken answer was interrupted. '
+            'The complete answer may remain in chat history, but do not assume '
+            'the user heard its unplayed remainder. Only these complete speech '
+            'chunks are confirmed played (the last chunk may have been partly heard):\n'
+            '${jsonEncode(heard)}';
       },
       sendQuestion: (question) => _sendVoiceQuestion(question),
       sendStreamingQuestion: (question, onReply) =>

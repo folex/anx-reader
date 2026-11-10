@@ -1,6 +1,7 @@
 import 'oauth_foreground_gate.dart';
 import 'secure_transport.dart';
 import 'responses_socket.dart';
+import '../voice/assistant_activity.dart';
 import 'network_error.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -564,6 +565,7 @@ class ChatGptPlan extends ChangeNotifier {
     int? expectedRequestRevision,
     List<ChatGptToolBinding> tools = const [],
     bool Function()? toolScopeCurrent,
+    void Function(AssistantActivity)? onActivity,
   }) async* {
     await initialize();
     final account = active;
@@ -611,11 +613,21 @@ class ChatGptPlan extends ChangeNotifier {
         onRequest: (continuation, count) => debugPrint(
           'ChatGPT WebSocket: ${continuation ? 'continuation' : 'full'} input_items=$count',
         ),
-        connect: () => WebSocket.connect(
-          chatGptResponsesWebSocketUrl,
-          headers: {HttpHeaders.authorizationHeader: 'Bearer $token'},
-          customClient: client,
-        ),
+        connect: () async {
+          if (current()) onActivity?.call(AssistantActivity.connecting);
+          try {
+            final socket = await WebSocket.connect(
+              chatGptResponsesWebSocketUrl,
+              headers: {HttpHeaders.authorizationHeader: 'Bearer $token'},
+              customClient: client,
+            );
+            if (current()) onActivity?.call(AssistantActivity.thinking);
+            return socket;
+          } on IOException {
+            if (current()) onActivity?.call(AssistantActivity.disconnected);
+            rethrow;
+          }
+        },
       );
       responsesSocket = connection;
       _responseSockets.add(connection);
@@ -656,6 +668,9 @@ class ChatGptPlan extends ChangeNotifier {
           tools: tools,
           request: send,
           isCurrent: current,
+          onActivity: (value) {
+            if (current()) onActivity?.call(value);
+          },
         );
       }
     } finally {

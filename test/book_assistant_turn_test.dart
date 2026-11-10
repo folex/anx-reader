@@ -1,9 +1,37 @@
+import 'package:anx_reader/service/voice/assistant_activity.dart';
 import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:anx_reader/service/voice/book_assistant_turn.dart';
 import 'package:anx_reader/service/voice/reader_assistant_context.dart';
 
 void main() {
+  test('old request activity cannot overwrite the next turn', () async {
+    final source = StreamController<String>.broadcast();
+    final turn = BookAssistantTurn(
+        prepare: () async {},
+        context: () async => null,
+        scope: () => 'one',
+        stream: (_, __) => source.stream,
+        cancelBackend: () {});
+    final first = turn.send('first');
+    final failure = expectLater(first, throwsStateError);
+    await Future<void>.delayed(Duration.zero);
+    final old = turn.activityListener;
+    old(AssistantActivity.tools);
+    expect(turn.activity, AssistantActivity.tools);
+    await turn.cancel();
+    await failure;
+    final next = turn.send('next');
+    final nextFailure = expectLater(next, throwsStateError);
+    await Future<void>.delayed(Duration.zero);
+    final current = turn.activity;
+    old(AssistantActivity.disconnected);
+    expect(turn.activity, current);
+    await turn.cancel();
+    await nextFailure;
+    await source.close();
+    turn.dispose();
+  });
   test('first request accepts account restoration before capturing identity',
       () async {
     var account = 'not-loaded';

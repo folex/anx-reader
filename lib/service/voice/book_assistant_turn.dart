@@ -49,7 +49,9 @@ class BookAssistantTurn extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  Future<String> send(String text) async {
+  Future<String> send(String text, {void Function(String)? onReply}) async {
+    final timing = Stopwatch()..start();
+    var firstReply = true;
     if (busy) throw StateError('Wait for the previous response.');
     final generation = ++_generation;
     _scope = null;
@@ -65,9 +67,13 @@ class BookAssistantTurn extends ChangeNotifier {
     unawaited(result.then<void>((_) {}, onError: (Object _, StackTrace __) {}));
     try {
       await prepare();
+      debugPrint(
+          'AnxAssistantTiming: prepare_ms=${timing.elapsedMilliseconds}');
       if (generation != _generation) return await result;
       _scope = scope();
       final extra = await context();
+      debugPrint(
+          'AnxAssistantTiming: context_ms=${timing.elapsedMilliseconds}');
       if (generation != _generation) return await result;
       if (_scope != scope()) throw StateError('The book or chat changed.');
       _subscription = stream(text, extra).listen(
@@ -78,6 +84,12 @@ class BookAssistantTurn extends ChangeNotifier {
             return;
           }
           reply = answer;
+          if (firstReply && answer.trim().isNotEmpty) {
+            firstReply = false;
+            debugPrint(
+                'AnxAssistantTiming: first_text_ms=${timing.elapsedMilliseconds}');
+          }
+          onReply?.call(answer);
           _notify();
         },
         onError: (Object e, StackTrace stack) {
@@ -97,6 +109,8 @@ class BookAssistantTurn extends ChangeNotifier {
               ),
             );
           } else {
+            debugPrint(
+                'AnxAssistantTiming: completed_ms=${timing.elapsedMilliseconds}');
             pending.complete(value);
           }
         },

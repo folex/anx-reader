@@ -6,6 +6,7 @@ import 'package:anx_reader/providers/ai_history.dart';
 import 'package:anx_reader/service/ai/ai_history.dart';
 import 'package:anx_reader/service/ai/index.dart';
 import 'package:anx_reader/utils/ai_reasoning_parser.dart';
+import 'package:anx_reader/service/voice/assistant_prompt_history.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:langchain_core/chat_models.dart';
@@ -190,7 +191,10 @@ class AiChat extends _$AiChat {
       await for (final chunk in aiGenerateStream(
         [
           if (transientContext != null) ChatMessage.system(transientContext),
-          ...messages,
+          ...(assistantMode
+              ? assistantPromptHistory(messages,
+                  reusePrevious: Prefs().assistantReusePreviousChat)
+              : messages),
         ],
         regenerate: isRegenerate,
         useAgent: true,

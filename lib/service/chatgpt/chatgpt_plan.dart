@@ -631,6 +631,8 @@ class ChatGptPlan extends ChangeNotifier {
             if (specs.isNotEmpty) 'include': ['reasoning.encrypted_content'],
           });
 
+      debugPrint(
+          'AnxAssistantTiming: model=${account.model} history_items=${input.length} history_chars=${jsonEncode(input).length} tools=${tools.length}');
       if (tools.isEmpty) {
         yield* chatGptText(send(input, const []));
       } else {

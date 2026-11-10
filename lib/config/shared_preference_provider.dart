@@ -55,6 +55,10 @@ const Set<String> _prefsImportSkipKeys = {
 
 class Prefs extends ChangeNotifier {
   late SharedPreferences prefs;
+  bool get assistantReusePreviousChat => prefs.getBool('assistantReusePreviousChat') ?? true;
+  Future<void> setAssistantReusePreviousChat(bool value) async {
+    await prefs.setBool('assistantReusePreviousChat', value);
+  }
   static final Prefs _instance = Prefs._internal();
 
   factory Prefs() {

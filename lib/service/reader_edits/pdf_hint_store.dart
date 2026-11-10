@@ -58,6 +58,7 @@ class PdfHintStore {
       for (final record in entry.value as List) {
         if (++count > 5000 ||
             record is! Map ||
+            record['superseded'] != null && record['superseded'] is! bool ||
             record['spec'] is! Map ||
             record['anchor'] is! Map ||
             !RegExp(r'^[a-f0-9]{64}$').hasMatch('${record['requestHash']}'))
@@ -158,7 +159,8 @@ class PdfHintStore {
           if (await sidecar.exists()) await sidecar.copy(backup.path);
           check();
           if (await _hash(snapshot.file) != snapshot.sourceHash) {
-            throw const EpubEditException('PDF changed during save. Notes were not replaced.');
+            throw const EpubEditException(
+                'PDF changed during save. Notes were not replaced.');
           }
           check();
           await temp.rename(sidecar.path);

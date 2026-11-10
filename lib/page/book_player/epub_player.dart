@@ -686,6 +686,8 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
         'missing_context' =>
           'Provide an exact phrase and surrounding context or a verified paragraphHash.',
         'occurrence_missing' => 'The specified occurrence does not exist.',
+        'legacy_overlap' =>
+          'Overlapping legacy highlights cannot be distinguished safely. Nothing was saved.',
         'invalid_metadata' =>
           'Saved annotation metadata is invalid. Nothing was saved.',
         'invalid_xhtml' =>
@@ -771,6 +773,7 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
       'changed': changed,
       'chapterHref': href,
       'items': raw['items'],
+      'activeCount': raw['activeCount'],
       'storage': 'Anx PDF sidecar; original PDF bytes unchanged',
       'displayed': displayed,
       if (!displayed)

@@ -40,8 +40,8 @@ export function validateEpubEdit(input) {
     if (![1, 2, 3].includes(tier)) throw new Error('tier must be 1, 2 or 3')
     const alignment = input.alignment ?? 'left'
     if (!['left', 'center', 'right'].includes(alignment)) throw new Error('Invalid alignment')
-    if (input.mode != null && (type !== 'ruby' || !['append', 'overwrite'].includes(input.mode)))
-        throw new Error('Invalid ruby mode')
+    if (input.mode != null && !['append', 'overwrite'].includes(input.mode))
+        throw new Error('Invalid annotation mode')
     const occurrence = input.occurrence
     if (occurrence != null && (!Number.isInteger(occurrence) || occurrence < 1))
         throw new Error('Invalid occurrence')
@@ -219,6 +219,7 @@ function insertHighlight(doc, anchor, spec, number) {
         if (from >= to) continue
         const mark = doc.createElementNS(XHTML, 'span')
         mark.setAttribute('data-anx-edit-wrap', 'highlight')
+        mark.setAttribute('data-anx-edit-id', spec.operationId)
         mark.setAttribute('data-anx-hint-highlight', '1')
         mark.setAttribute('data-anx-edit-group', spec.group)
         mark.setAttribute('data-anx-edit-tier', String(spec.tier))
@@ -335,6 +336,43 @@ function groupRuntime() {
     }, { once: true })
 }
 
+function sameAnchor(a, b) {
+    return a.paragraphHash === b.paragraphHash && a.paragraphIndex === b.paragraphIndex && a.start === b.start && a.end === b.end
+}
+
+function removeOverwrittenEdits(doc, anchor, spec, records) {
+    const replaced = records.filter(record => !record.superseded && record.type === spec.type && sameAnchor(record.anchor, anchor))
+    const ids = new Set(replaced.map(record => record.operationId))
+    const highlights = [...doc.querySelectorAll('[data-anx-edit-wrap="highlight"]')]
+        .filter(element => ids.has(element.getAttribute('data-anx-edit-id')))
+    if (spec.type === 'highlight' && replaced.length) {
+        // Before operation ids were stamped on wrappers, one highlight could
+        // consist of several spans across original inline markup. Resolve its
+        // ownership from original-text offsets; reject ambiguous old overlaps.
+        for (const element of anchor.block.querySelectorAll('[data-anx-edit-wrap="highlight"]:not([data-anx-edit-id])')) {
+            const nodes = anchor.map.nodes.filter(entry => element.contains(entry.node))
+            if (!nodes.length) continue
+            const start = anchor.map.ends.findIndex(end => end > nodes[0].start)
+            const after = anchor.map.starts.findIndex(offset => offset >= nodes.at(-1).end)
+            const end = after < 0 ? anchor.map.text.length : after
+            if (start < anchor.start || end > anchor.end) continue
+            const owners = records.filter(record => !record.superseded && record.type === 'highlight' &&
+                record.anchor.paragraphHash === anchor.paragraphHash && record.anchor.paragraphIndex === anchor.paragraphIndex &&
+                record.anchor.start <= start && record.anchor.end >= end)
+            if (owners.some(owner => !ids.has(owner.operationId)))
+                throw new Error('Overlapping legacy highlights cannot be distinguished; nothing changed')
+            if (owners.length) highlights.push(element)
+        }
+    }
+    for (const element of highlights) element.replaceWith(...element.childNodes)
+    for (const record of replaced) {
+        const reference = doc.getElementById(`anx-ref-${record.operationId}`)
+        if (reference) (reference.closest('.anx-edit-ref-wrap') ?? reference).remove()
+        doc.getElementById(`anx-note-${record.operationId}`)?.remove()
+        record.superseded = true
+    }
+}
+
 async function prepareSingleEpubEdit(source, input, bookKey) {
     const spec = validateEpubEdit(input)
     const doc = new DOMParser().parseFromString(source, 'application/xhtml+xml')
@@ -345,6 +383,7 @@ async function prepareSingleEpubEdit(source, input, bookKey) {
     const records = metadata ? JSON.parse(metadata.textContent) : []
     if (!Array.isArray(records) || records.length > 5000 || records.some(record =>
         !record || typeof record !== 'object' ||
+        record.superseded != null && typeof record.superseded !== 'boolean' ||
         !/^[A-Za-z0-9._-]{1,80}$/.test(record.operationId) ||
         !['footnote', 'ruby', 'highlight'].includes(record.type) || !/^[a-f0-9]{64}$/.test(record.requestHash) ||
         !/^[a-f0-9]{64}$/.test(record.semanticHash) ||
@@ -368,7 +407,8 @@ async function prepareSingleEpubEdit(source, input, bookKey) {
         text: normalize(spec.text), group: spec.group, tier: spec.tier,
         alignment: spec.type === 'ruby' ? spec.alignment : null, ...(spec.mode ? { mode: spec.mode } : {}), ...(spec.tags ? { tags: spec.tags } : {}), ...(spec.type === 'highlight' ? { color: spec.color } : {}) }))
     const sameEdit = records.find(x => !x.superseded && x.semanticHash === semanticHash)
-    if (sameEdit) return { unchanged: true, anchor: sameEdit.anchor, operationId: sameEdit.operationId }
+    if (sameEdit && spec.mode !== 'overwrite') return { unchanged: true, anchor: sameEdit.anchor, operationId: sameEdit.operationId }
+    if (spec.mode === 'overwrite' && spec.type !== 'ruby') removeOverwrittenEdits(doc, anchor, spec, records)
     if (spec.type === 'ruby') {
         const replaced = insertRuby(doc, anchor, spec) ?? []
         for (const record of records) if (replaced.includes(record.operationId)) record.superseded = true
@@ -436,6 +476,7 @@ export async function prepareEpubEditForBridge(source, input, bookKey) {
             : message.startsWith('operationId was already used') ? 'operation_collision'
             : message.startsWith('An exact quote needs surrounding context') ? 'missing_context'
             : message.startsWith('Requested occurrence does not exist') ? 'occurrence_missing'
+            : message.startsWith('Overlapping legacy highlights') ? 'legacy_overlap'
             : message.includes('edit metadata') ? 'invalid_metadata'
             : message.includes('XHTML') ? 'invalid_xhtml' : 'invalid_input'
         return { editError: code }

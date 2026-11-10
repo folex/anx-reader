@@ -1,3 +1,4 @@
+import '../voice/assistant_activity.dart';
 import 'package:anx_reader/service/extensions/extension_manager.dart';
 import 'package:langchain_core/tools.dart';
 import 'package:anx_reader/service/ai/tools/ai_tool_registry.dart';
@@ -60,6 +61,7 @@ Stream<String> aiGenerateStream(
   bool useAgent = false,
   WidgetRef? ref,
   List<String>? toolIdsOverride,
+  void Function(AssistantActivity)? onActivity,
 }) {
   if (useAgent) {
     assert(ref != null, 'ref must be provided when useAgent is true');
@@ -78,6 +80,7 @@ Stream<String> aiGenerateStream(
     useAgent: useAgent,
     registry: registry,
     ref: ref,
+    onActivity: onActivity,
     expectedChatGptAccount: ChatGptPlan.instance.active?.id,
     expectedBook: ref == null ? null : ref.read(currentReadingProvider),
     expectedRequestRevision: ChatGptPlan.instance.requestRevision,
@@ -100,6 +103,7 @@ Stream<String> _generateStream({
   String? expectedChatGptAccount,
   CurrentReadingState? expectedBook,
   int? expectedRequestRevision,
+  void Function(AssistantActivity)? onActivity,
 }) async* {
   if (Platform.isAndroid) await ExtensionManager.instance.initialize();
   final chatgpt = ChatGptPlan.instance;
@@ -197,6 +201,7 @@ Stream<String> _generateStream({
       expectedRequestRevision: expectedRequestRevision,
       tools: bindings,
       toolScopeCurrent: bindings.isEmpty ? null : editScopeCurrent,
+      onActivity: onActivity,
     );
 
     return;

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'assistant_activity.dart';
 
 /// Preparation may canonicalize history, but cannot transfer a question to a
 /// different book/account/provider while asynchronous history loading completes.
@@ -42,6 +43,16 @@ class BookAssistantTurn extends ChangeNotifier {
   int _generation = 0;
   bool _disposed = false;
   bool busy = false;
+  AssistantActivity activity = AssistantActivity.idle;
+  void Function(AssistantActivity) get activityListener {
+    final generation = _generation;
+    return (value) {
+      if (_disposed || !busy || generation != _generation) return;
+      activity = value;
+      _notify();
+    };
+  }
+
   String question = '', reply = '';
   String? error;
   String? _scope;
@@ -56,6 +67,7 @@ class BookAssistantTurn extends ChangeNotifier {
     final generation = ++_generation;
     _scope = null;
     busy = true;
+    activity = AssistantActivity.connecting;
     question = text;
     reply = '';
     error = null;
@@ -76,6 +88,8 @@ class BookAssistantTurn extends ChangeNotifier {
           'AnxAssistantTiming: context_ms=${timing.elapsedMilliseconds}');
       if (generation != _generation) return await result;
       if (_scope != scope()) throw StateError('The book or chat changed.');
+      activity = AssistantActivity.thinking;
+      _notify();
       _subscription = stream(text, extra).listen(
         (answer) {
           if (generation != _generation) return;
@@ -119,6 +133,9 @@ class BookAssistantTurn extends ChangeNotifier {
     } catch (e) {
       if (generation == _generation) {
         error = '$e';
+        if (activity != AssistantActivity.disconnected) {
+          activity = AssistantActivity.error;
+        }
         _notify();
       }
       rethrow;
@@ -128,6 +145,7 @@ class BookAssistantTurn extends ChangeNotifier {
         _subscription = null;
         _pending = null;
         busy = false;
+        if (error == null) activity = AssistantActivity.idle;
         _notify();
       }
     }
@@ -137,17 +155,19 @@ class BookAssistantTurn extends ChangeNotifier {
     if (busy && _scope != null && _scope != scope()) cancel();
   }
 
-  void cancel() {
+  Future<void> cancel() async {
     if (!busy) return;
     ++_generation;
     if (_subscription != null) cancelBackend();
-    unawaited(_subscription?.cancel());
+    final cancellation = _subscription?.cancel();
     _subscription = null;
     if (_pending?.isCompleted == false)
       _pending!.completeError(StateError('Request canceled.'));
     _pending = null;
     busy = false;
+    activity = AssistantActivity.idle;
     _notify();
+    await cancellation;
   }
 
   @override

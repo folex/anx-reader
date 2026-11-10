@@ -3,6 +3,7 @@ import 'package:anx_reader/service/ai/index.dart';
 import 'package:anx_reader/service/ai/tools/ai_tool_registry.dart';
 import 'package:anx_reader/service/chatgpt/chatgpt_plan.dart';
 import 'package:anx_reader/service/reader_edits/chatgpt_tool_loop.dart';
+import 'package:anx_reader/service/voice/assistant_activity.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,6 +22,7 @@ class InspectPlan extends ChatGptPlan {
     String? readingContext, String? expectedAccountId,
     int? expectedRequestRevision, List<ChatGptToolBinding> tools = const [],
     bool Function()? toolScopeCurrent,
+    void Function(AssistantActivity)? onActivity,
   }) async* {
     expect(toolScopeCurrent?.call(), true);
     captured = tools;

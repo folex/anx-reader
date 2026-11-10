@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import '../voice/assistant_activity.dart';
 
 import 'package:anx_reader/service/chatgpt/protocol.dart';
 
@@ -38,6 +39,7 @@ Stream<String> chatGptToolLoop({
   required bool Function() isCurrent,
   int maxRounds = 5,
   int maxCalls = 32,
+  void Function(AssistantActivity)? onActivity,
 }) async* {
   void guard() {
     if (!isCurrent())
@@ -55,6 +57,7 @@ Stream<String> chatGptToolLoop({
   var visible = '';
   for (var round = 0; round < maxRounds; round++) {
     guard();
+    onActivity?.call(AssistantActivity.thinking);
     Map<String, dynamic>? completed;
     final items = <String, Map<String, dynamic>>{};
     var retainedItemBytes = 0;
@@ -116,6 +119,7 @@ Stream<String> chatGptToolLoop({
             error is! SocketException &&
             error is! WebSocketException) rethrow;
         guard();
+        onActivity?.call(AssistantActivity.disconnected);
         if (attempt >= 1) rethrow;
         // Retry only generation of this response. Previously saved tool
         // outputs remain in input, and no pending call executes before the
@@ -197,6 +201,7 @@ Stream<String> chatGptToolLoop({
     if (roundText.isNotEmpty) visible += '\n';
     for (final call in requested) {
       guard();
+      onActivity?.call(AssistantActivity.tools);
       final id = call['call_id'];
       final name = call['name'];
       final arguments = call['arguments'];

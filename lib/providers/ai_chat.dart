@@ -1,3 +1,4 @@
+import 'package:anx_reader/service/voice/assistant_activity.dart';
 import 'package:anx_reader/service/ai/tools/ai_tool_registry.dart';
 import 'package:anx_reader/service/chatgpt/chatgpt_plan.dart';
 import 'package:anx_reader/providers/current_reading.dart';
@@ -90,6 +91,7 @@ class AiChat extends _$AiChat {
     String? transientContext,
     Object? requestOwner,
     bool assistantMode = false,
+    void Function(AssistantActivity)? onActivity,
   }) async* {
     if (_turnActive) throw StateError('Wait for the previous response.');
     _turnActive = true;
@@ -101,6 +103,7 @@ class AiChat extends _$AiChat {
         isRegenerate,
         transientContext: transientContext,
         assistantMode: assistantMode,
+        onActivity: onActivity,
       );
     } finally {
       _turnOwner = null;
@@ -114,6 +117,7 @@ class AiChat extends _$AiChat {
     bool isRegenerate, {
     String? transientContext,
     bool assistantMode = false,
+    void Function(AssistantActivity)? onActivity,
   }) async* {
     final readingBefore = widgetRef.read(currentReadingProvider);
     await prepareBookChat();
@@ -199,6 +203,7 @@ class AiChat extends _$AiChat {
         regenerate: isRegenerate,
         useAgent: true,
         toolIdsOverride: assistantMode ? bookAssistantToolIds : null,
+        onActivity: onActivity,
         ref: widgetRef,
       )) {
         if (epoch != _conversationEpoch) return;

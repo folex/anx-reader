@@ -34,6 +34,7 @@ class AssistantSession extends ChangeNotifier {
     this.sendStreamingQuestion,
     required this.currentScope,
     this.cancelQuestion,
+    this.onInterrupted,
     @visibleForTesting this.echoTail = const Duration(milliseconds: 250),
   })  : speech = speech ?? AndroidReaderVoiceNative.instance,
         tts = tts ?? AndroidAssistantTtsNative.instance {
@@ -47,6 +48,7 @@ class AssistantSession extends ChangeNotifier {
       sendStreamingQuestion;
   final String Function() currentScope;
   final FutureOr<void> Function()? cancelQuestion;
+  final void Function(String confirmedSpokenText)? onInterrupted;
   final Duration echoTail;
   Future<void> _cancellationTail = Future.value();
   late final StreamSubscription<Map<String, dynamic>> _speechEvents, _ttsEvents;
@@ -63,6 +65,11 @@ class AssistantSession extends ChangeNotifier {
   String _queuedText = '';
   Stopwatch? _answerTiming;
   bool _firstAudio = true;
+  bool _continuous = false, _duplex = false, _responding = false;
+  String _playingText = '', _confirmedSpoken = '', _echoReference = '';
+  String _lastFinal = '';
+  DateTime? _lastFinalAt;
+  DateTime? _echoUntil;
   bool get active => state != AssistantState.inactive;
   bool get busy => _running;
   String _id(String kind) =>
@@ -136,6 +143,7 @@ class AssistantSession extends ChangeNotifier {
 
   /// Stop queued speech/model work before opening the microphone again.
   Future<void> interrupt() async {
+    if (_running && _responding) onInterrupted?.call(_confirmedSpoken);
     await pause();
     if (!_disposed && _scope == currentScope()) await resume();
   }
@@ -164,6 +172,9 @@ class AssistantSession extends ChangeNotifier {
     _speechQueue.clear();
     _queuedText = '';
     _answerDone = false;
+    _responding = false;
+    _continuous = false;
+    _duplex = false;
     final speechId = _speechId, ttsId = _ttsId;
     _speechId = null;
     _ttsId = null;
@@ -188,6 +199,13 @@ class AssistantSession extends ChangeNotifier {
 
   Future<void> _listen(int generation) async {
     if (!_valid(generation)) return;
+    _responding = false;
+    if (_speechId != null) {
+      state = AssistantState.listening;
+      status = 'Listening for your question…';
+      _notify();
+      return;
+    }
     final id = _id('asr');
     _speechId = id;
     transcript = '';
@@ -215,18 +233,40 @@ class AssistantSession extends ChangeNotifier {
       case 'permission':
         status = 'Allow microphone access in the system dialog.';
       case 'starting' || 'listening':
+        if (event['continuous'] == true) {
+          _continuous = true;
+          _duplex = event['echoCancellation'] == true;
+        }
+        if (_responding) return;
         state = AssistantState.listening;
         status = 'Listening for your question…';
       case 'processing':
+        if (_responding) return;
         state = AssistantState.transcribing;
         status = 'Transcribing your question…';
       case 'partial':
-        transcript = _text(event['text']);
+        final text = _text(event['text']);
+        if (_responding) {
+          if (!_continuous || _isEcho(text) || !_interruptibleText(text))
+            return;
+          _bargeIn();
+        }
+        transcript = text;
       case 'transcript':
         final id = _speechId!;
-        final generation = _generation;
-        _speechId = null;
+        final keptOpen = _continuous && event['continuous'] == true;
+        if (!keptOpen) _speechId = null;
         final text = _text(event['text']);
+        if (_responding && _isEcho(text)) return;
+        final now = DateTime.now();
+        if (text == _lastFinal &&
+            _lastFinalAt != null &&
+            now.difference(_lastFinalAt!) < const Duration(milliseconds: 600))
+          return;
+        _lastFinal = text;
+        _lastFinalAt = now;
+        if (_responding) _bargeIn();
+        final generation = _generation;
         if (text.isEmpty) {
           _silence(generation);
           return;
@@ -235,7 +275,7 @@ class AssistantSession extends ChangeNotifier {
         state = AssistantState.transcribing;
         status = 'Preparing your question…';
         _notify();
-        unawaited(_answer(generation, id, text));
+        unawaited(_answer(generation, id, text, keptOpen: keptOpen));
         return;
       case 'error':
         _speechId = null;
@@ -261,6 +301,54 @@ class AssistantSession extends ChangeNotifier {
     _notify();
   }
 
+  bool _interruptibleText(String text) =>
+      RegExp(r'[\p{L}\p{N}]{3}', unicode: true).hasMatch(text);
+
+  bool _isEcho(String text) {
+    if (_playingText.isEmpty &&
+        (_echoUntil == null || DateTime.now().isAfter(_echoUntil!))) {
+      return false;
+    }
+    if (_playingText.isEmpty && _echoReference.isEmpty) return false;
+    String normalized(String value) => value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^\p{L}\p{N}]+', unicode: true), ' ')
+        .trim();
+    final said = normalized(text);
+    if (said.isEmpty) return true;
+    final reference = normalized('$_echoReference $_playingText');
+    // AEC is the primary protection. Reject recognizable leaked playback too.
+    if (reference.contains(said)) return true;
+    final words = said.split(' ');
+    final source = reference.split(' ').toSet();
+    return words.length >= 3 &&
+        words.where(source.contains).length / words.length >= .85;
+  }
+
+  /// LiveKit-style turn cancellation: stop generation and queued playback while
+  /// retaining the incoming user audio. Never reopen ASR or lose its first words.
+  void _bargeIn() {
+    onInterrupted?.call(_confirmedSpoken);
+    _generation++;
+    _retry?.cancel();
+    _retry = null;
+    final ttsId = _ttsId;
+    _ttsId = null;
+    _speechQueue.clear();
+    _queuedText = '';
+    _answerDone = false;
+    _responding = false;
+    _playingText = '';
+    _cancellationTail = Future.wait<void>([
+      _cancellationTail,
+      if (cancelQuestion != null) _quiet(Future<void>.sync(cancelQuestion!)),
+      if (ttsId != null) _quiet(tts.invoke('stop', {'id': ttsId})),
+    ]).then((_) {});
+    state = AssistantState.listening;
+    status = 'Listening for your question…';
+    _notify();
+  }
+
   void _silence(int generation) {
     if (!_valid(generation)) return;
     // A live audio-source session waits silently in native code. A terminal
@@ -271,14 +359,18 @@ class AssistantSession extends ChangeNotifier {
     );
   }
 
-  Future<void> _answer(int generation, String speechId, String question) async {
+  Future<void> _answer(int generation, String speechId, String question,
+      {bool keptOpen = false}) async {
     _answerTiming = Stopwatch()..start();
     _firstAudio = true;
     try {
       // Recognition final normally destroys the native recognizer already.
       // Explicit cancellation also fences providers that finalize unusually.
-      await speech.invoke('cancel', {'id': speechId});
+      if (!keptOpen) await speech.invoke('cancel', {'id': speechId});
+      await _cancellationTail;
       if (!_valid(generation)) return;
+      _responding = true;
+      _confirmedSpoken = '';
       state = AssistantState.thinking;
       status = 'Thinking about your question…';
       _notify();
@@ -367,8 +459,17 @@ class AssistantSession extends ChangeNotifier {
     try {
       await _cancellationTail;
       if (!_valid(generation) || _ttsId != id) return;
-      await tts.invoke('speak',
-          {'id': id, 'text': _speechQueue.removeAt(0), 'language': language});
+      // Devices without working echo cancellation stay half-duplex during TTS.
+      // Automatic barge-in still works while thinking; tap always interrupts.
+      if (_speechId != null && _continuous && !_duplex) {
+        final micId = _speechId;
+        _speechId = null;
+        await speech.invoke('cancel', {'id': micId});
+        if (!_valid(generation) || _ttsId != id) return;
+      }
+      _playingText = _speechQueue.removeAt(0);
+      await tts.invoke(
+          'speak', {'id': id, 'text': _playingText, 'language': language});
     } catch (_) {
       if (_valid(generation) && _ttsId == id)
         _fail('Could not start speech playback.');
@@ -400,6 +501,10 @@ class AssistantSession extends ChangeNotifier {
         status = 'Reading the response aloud…';
         _notify();
       case 'completed':
+        _confirmedSpoken = '$_confirmedSpoken $_playingText'.trim();
+        _echoReference = _playingText;
+        _echoUntil = DateTime.now().add(echoTail);
+        _playingText = '';
         _ttsId = null;
         final generation = _generation;
         if (_speechQueue.isNotEmpty) {

@@ -70,6 +70,132 @@ void main() {
     await speech.controller.close();
     await tts.controller.close();
   });
+  test('continuous AEC microphone survives playback and voice barge-in',
+      () async {
+    final heard = <String>[];
+    session.dispose();
+    session = AssistantSession(
+      speech: speech,
+      tts: tts,
+      currentScope: () => scope,
+      sendQuestion: (q) {
+        questions.add(q);
+        return answer.future;
+      },
+      cancelQuestion: () {
+        cancels++;
+      },
+      onInterrupted: heard.add,
+      echoTail: Duration.zero,
+    );
+    await session.start();
+    final mic = speech.id('startAssistantListening');
+    speech.controller.add({
+      'id': mic,
+      'type': 'starting',
+      'continuous': true,
+      'echoCancellation': true
+    });
+    speech.controller.add({
+      'id': mic,
+      'type': 'transcript',
+      'text': 'Первый вопрос',
+      'continuous': true
+    });
+    await drain();
+    expect(speech.count('cancel'), 0);
+    answer.complete('Вот длинное объяснение значения глагола.');
+    await drain();
+    final playback = tts.id('speak');
+    final before = cancels;
+    speech.event(mic, 'partial', text: 'объяснение значения глагола');
+    expect(cancels, before, reason: 'own playback must not interrupt');
+    speech.event(mic, 'partial', text: 'Нет, теперь другой вопрос');
+    await drain();
+    expect(tts.calls.where((c) => c['method'] == 'stop' && c['id'] == playback),
+        hasLength(1));
+    expect(cancels, before + 1);
+    expect(session.state, AssistantState.listening);
+    expect(speech.count('startAssistantListening'), 1);
+    expect(speech.count('cancel'), 0);
+    expect(heard, [''], reason: 'an incomplete chunk is not confirmed heard');
+    answer = Completer<String>();
+    speech.controller.add({
+      'id': mic,
+      'type': 'transcript',
+      'text': 'Нет, теперь другой вопрос',
+      'continuous': true
+    });
+    await drain();
+    expect(questions, ['Первый вопрос', 'Нет, теперь другой вопрос']);
+    tts.event(playback, 'completed');
+    expect(session.state, AssistantState.thinking);
+    answer.complete('Новый ответ.');
+    await drain();
+    tts.event(tts.id('speak'), 'completed');
+    await drain();
+    expect(session.state, AssistantState.listening);
+    expect(speech.count('startAssistantListening'), 1);
+  });
+  test('barge-in cancels a pending answer and fences its late result',
+      () async {
+    await session.start();
+    final mic = speech.id('startAssistantListening');
+    speech.controller.add({
+      'id': mic,
+      'type': 'starting',
+      'continuous': true,
+      'echoCancellation': true
+    });
+    speech.controller.add({
+      'id': mic,
+      'type': 'transcript',
+      'text': 'Первый вопрос',
+      'continuous': true
+    });
+    await drain();
+    final old = answer;
+    speech.event(mic, 'partial', text: 'Передумал');
+    await drain();
+    answer = Completer<String>();
+    speech.controller.add({
+      'id': mic,
+      'type': 'transcript',
+      'text': 'Новый вопрос',
+      'continuous': true
+    });
+    await drain();
+    old.complete('Устаревший ответ.');
+    await drain();
+    expect(tts.count('speak'), 0);
+    answer.complete('Актуальный ответ.');
+    await drain();
+    expect(tts.calls.last['text'], 'Актуальный ответ.');
+  });
+  test('missing AEC closes input before playback instead of feeding back',
+      () async {
+    await session.start();
+    final mic = speech.id('startAssistantListening');
+    speech.controller.add({
+      'id': mic,
+      'type': 'starting',
+      'continuous': true,
+      'echoCancellation': false
+    });
+    speech.controller.add({
+      'id': mic,
+      'type': 'transcript',
+      'text': 'Вопрос',
+      'continuous': true
+    });
+    await drain();
+    answer.complete('Объяснение.');
+    await drain();
+    expect(speech.count('cancel'), 1);
+    tts.event(tts.id('speak'), 'completed');
+    await drain();
+    expect(speech.count('startAssistantListening'), 2);
+  });
   test(
     'one final utterance produces one model turn and one TTS; rearm waits real completion',
     () async {

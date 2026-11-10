@@ -1,3 +1,5 @@
+import 'assistant_orb.dart';
+import 'package:anx_reader/service/voice/assistant_activity.dart';
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -119,6 +121,29 @@ class _FloatingBookAssistantState extends State<FloatingBookAssistant>
         AssistantState.inactive =>
           widget.turn.busy ? 'Thinking' : 'Book assistant',
       };
+  AssistantOrbState get _orbState {
+    if (widget.session.state == AssistantState.speaking)
+      return AssistantOrbState.speaking;
+    if (widget.turn.activity == AssistantActivity.disconnected)
+      return AssistantOrbState.disconnected;
+    if (widget.turn.busy)
+      return switch (widget.turn.activity) {
+        AssistantActivity.tools => AssistantOrbState.tools,
+        AssistantActivity.connecting => AssistantOrbState.connecting,
+        _ => AssistantOrbState.thinking,
+      };
+    if (widget.session.error != null || widget.turn.error != null)
+      return AssistantOrbState.error;
+    return switch (widget.session.state) {
+      AssistantState.listening ||
+      AssistantState.transcribing =>
+        AssistantOrbState.listening,
+      AssistantState.thinking => AssistantOrbState.thinking,
+      AssistantState.paused => AssistantOrbState.paused,
+      _ => AssistantOrbState.idle,
+    };
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: Listenable.merge([widget.session, widget.turn, _dictation]),
@@ -148,19 +173,12 @@ class _FloatingBookAssistantState extends State<FloatingBookAssistant>
                   Row(
                     children: [
                       const SizedBox(width: 12),
-                      Icon(
-                        widget.session.state == AssistantState.listening
-                            ? Icons.mic
-                            : Icons.auto_awesome,
-                        size: 22,
-                        color: widget.session.state == AssistantState.listening
-                            ? colors.error
-                            : colors.primary,
-                      ),
+                      SizedBox.square(
+                          dimension: 30, child: AssistantOrb(state: _orbState)),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          _status,
+                          'Book assistant',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.titleSmall,
@@ -472,13 +490,8 @@ class _FloatingBookAssistantState extends State<FloatingBookAssistant>
                                           AssistantState.thinking
                                   ? widget.session.interrupt
                                   : () => setState(() => _minimized = false),
-                          icon: Icon(
-                            widget.session.state == AssistantState.paused
-                                ? Icons.mic_off_outlined
-                                : Icons.mic,
-                            color:
-                                error != null ? colors.error : colors.primary,
-                          ),
+                          padding: EdgeInsets.zero,
+                          icon: AssistantOrb(state: _orbState),
                         ),
                       ),
                     ),

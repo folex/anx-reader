@@ -4,6 +4,10 @@ import 'dart:io';
 
 import 'protocol.dart';
 
+// Dart's WebSocket upgrade copies Uri.port before changing wss to https;
+// an implicit wss port becomes 0 in the pinned SDK. Preserve HTTPS port 443.
+const chatGptResponsesWebSocketUrl = 'wss://api.openai.com:443/v1/responses';
+
 /// One authenticated socket per user request, shared by every tool round.
 /// The caller retains the full transcript for reconnects; cached IDs never
 /// escape this connection or become part of persisted book history.

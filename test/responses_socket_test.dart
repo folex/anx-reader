@@ -32,6 +32,26 @@ Map<String, dynamic> completed(String id, List<dynamic> output) => {
     };
 
 void main() {
+  test('production WebSocket upgrade preserves verified HTTPS port 443',
+      () async {
+    final http = HttpClient();
+    var checked = false;
+    http.connectionFactory = (uri, _, __) async {
+      expect(uri.scheme, 'https');
+      expect(uri.host, 'api.openai.com');
+      expect(uri.port, 443);
+      checked = true;
+      throw const HandshakeException('test stops before network');
+    };
+    try {
+      await expectLater(
+          WebSocket.connect(chatGptResponsesWebSocketUrl, customClient: http),
+          throwsA(isA<HandshakeException>()));
+      expect(checked, true);
+    } finally {
+      http.close(force: true);
+    }
+  });
   late HttpServer server;
   late ChatGptResponsesSocket client;
   final sockets = <WebSocket>[];

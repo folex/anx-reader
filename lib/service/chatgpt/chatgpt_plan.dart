@@ -612,7 +612,7 @@ class ChatGptPlan extends ChangeNotifier {
           'ChatGPT WebSocket: ${continuation ? 'continuation' : 'full'} input_items=$count',
         ),
         connect: () => WebSocket.connect(
-          'wss://api.openai.com/v1/responses',
+          chatGptResponsesWebSocketUrl,
           headers: {HttpHeaders.authorizationHeader: 'Bearer $token'},
           customClient: client,
         ),

@@ -31,17 +31,20 @@ class AssistantSession extends ChangeNotifier {
     ReaderVoiceNative? speech,
     AssistantTtsNative? tts,
     required this.sendQuestion,
+    this.sendStreamingQuestion,
     required this.currentScope,
     this.cancelQuestion,
     @visibleForTesting this.echoTail = const Duration(milliseconds: 250),
-  }) : speech = speech ?? AndroidReaderVoiceNative.instance,
-       tts = tts ?? AndroidAssistantTtsNative.instance {
+  })  : speech = speech ?? AndroidReaderVoiceNative.instance,
+        tts = tts ?? AndroidAssistantTtsNative.instance {
     _speechEvents = this.speech.events.listen(_onSpeech);
     _ttsEvents = this.tts.events.listen(_onTts);
   }
   final ReaderVoiceNative speech;
   final AssistantTtsNative tts;
   final Future<String> Function(String) sendQuestion;
+  final Future<String> Function(String, void Function(String))?
+      sendStreamingQuestion;
   final String Function() currentScope;
   final FutureOr<void> Function()? cancelQuestion;
   final Duration echoTail;
@@ -55,6 +58,11 @@ class AssistantSession extends ChangeNotifier {
   int _generation = 0, _counter = 0;
   bool _running = false, _disposed = false;
   Timer? _retry;
+  final List<String> _speechQueue = [];
+  bool _answerDone = false;
+  String _queuedText = '';
+  Stopwatch? _answerTiming;
+  bool _firstAudio = true;
   bool get active => state != AssistantState.inactive;
   bool get busy => _running;
   String _id(String kind) =>
@@ -126,6 +134,12 @@ class AssistantSession extends ChangeNotifier {
     await cancellations;
   }
 
+  /// Stop queued speech/model work before opening the microphone again.
+  Future<void> interrupt() async {
+    await pause();
+    if (!_disposed && _scope == currentScope()) await resume();
+  }
+
   void onContextChanged() {
     if (_scope != null && _scope != currentScope()) {
       unawaited(pause());
@@ -147,6 +161,9 @@ class AssistantSession extends ChangeNotifier {
     _running = false;
     _retry?.cancel();
     _retry = null;
+    _speechQueue.clear();
+    _queuedText = '';
+    _answerDone = false;
     final speechId = _speechId, ttsId = _ttsId;
     _speechId = null;
     _ttsId = null;
@@ -227,10 +244,10 @@ class AssistantSession extends ChangeNotifier {
         else
           _fail(
             const [
-                  'continuous_unsupported',
-                  'continuous_ended',
-                  'audio_source_failed',
-                ].contains(event['code'])
+              'continuous_unsupported',
+              'continuous_ended',
+              'audio_source_failed',
+            ].contains(event['code'])
                 ? 'This Android service does not support quiet continuous listening. Use the dictation button instead.'
                 : _speechError(event['code']),
           );
@@ -255,7 +272,8 @@ class AssistantSession extends ChangeNotifier {
   }
 
   Future<void> _answer(int generation, String speechId, String question) async {
-    String? speakingId;
+    _answerTiming = Stopwatch()..start();
+    _firstAudio = true;
     try {
       // Recognition final normally destroys the native recognizer already.
       // Explicit cancellation also fences providers that finalize unusually.
@@ -264,9 +282,13 @@ class AssistantSession extends ChangeNotifier {
       state = AssistantState.thinking;
       status = 'Thinking about your question…';
       _notify();
-      final answer = await sendQuestion(
-        question,
-      ).timeout(const Duration(minutes: 2));
+      _answerDone = false;
+      _queuedText = '';
+      final streaming = sendStreamingQuestion;
+      final answer = await (streaming == null
+              ? sendQuestion(question)
+              : streaming(question, (text) => _queueReply(generation, text)))
+          .timeout(const Duration(minutes: 2));
       if (!_valid(generation)) return;
       reply = answer;
       final spoken = assistantSpeechText(answer);
@@ -278,21 +300,12 @@ class AssistantSession extends ChangeNotifier {
         _fail('The response is too long to read aloud. Open it in the chat.');
         return;
       }
-      final id = _id('tts');
-      speakingId = id;
-      _ttsId = id;
-      state = AssistantState.speaking;
-      status = 'Reading the response aloud…';
-      _notify();
-      await tts.invoke('speak', {
-        'id': id,
-        'text': spoken,
-        'language': language,
-      });
-      // Only a real native completed event may rearm ASR; invoke success means
-      // the request was accepted, not that audio playback finished.
+      _answerDone = true;
+      _queueReply(generation, answer, flush: true);
+      if (_ttsId == null && _speechQueue.isEmpty)
+        _resumeAfterAnswer(generation);
     } catch (failure) {
-      if (_valid(generation) && (speakingId == null || _ttsId == speakingId))
+      if (_valid(generation))
         _fail(
           failure is ChatGptError
               ? failure.message
@@ -303,6 +316,73 @@ class AssistantSession extends ChangeNotifier {
     }
   }
 
+  void _queueReply(int generation, String cumulative, {bool flush = false}) {
+    if (!_valid(generation)) return;
+    final plain = assistantSpeechText(cumulative);
+    if (plain.length > 32000) {
+      _fail('The response is too long to read aloud. Open it in the chat.');
+      return;
+    }
+    // Transport retries can roll back streamed text. Stop stale buffered
+    // speech before speaking the replacement.
+    if (!plain.startsWith(_queuedText)) {
+      final oldId = _ttsId;
+      _ttsId = null;
+      _speechQueue.clear();
+      _queuedText = '';
+      if (oldId != null) {
+        _cancellationTail = Future.wait<void>([
+          _cancellationTail,
+          _quiet(tts.invoke('stop', {'id': oldId})),
+        ]).then((_) {});
+      }
+    }
+    final tail = plain.substring(_queuedText.length);
+    var end = 0;
+    if (flush) {
+      end = tail.length;
+    } else {
+      final boundaries = RegExp(r'[.!?。！？](?:\s|$)').allMatches(tail);
+      for (final boundary in boundaries) {
+        if (boundary.end >= 20) {
+          end = boundary.end;
+          break;
+        }
+      }
+    }
+    if (end == 0) return;
+    final chunk = tail.substring(0, end).trim();
+    _queuedText = plain.substring(0, _queuedText.length + end).trimRight();
+    if (chunk.isNotEmpty) _speechQueue.add(chunk);
+    if (_ttsId == null) unawaited(_speakNext(generation));
+  }
+
+  Future<void> _speakNext(int generation) async {
+    if (!_valid(generation) || _ttsId != null || _speechQueue.isEmpty) return;
+    final id = _id('tts');
+    _ttsId = id;
+    state = AssistantState.speaking;
+    status = 'Reading the response aloud…';
+    _notify();
+    try {
+      await _cancellationTail;
+      if (!_valid(generation) || _ttsId != id) return;
+      await tts.invoke('speak',
+          {'id': id, 'text': _speechQueue.removeAt(0), 'language': language});
+    } catch (_) {
+      if (_valid(generation) && _ttsId == id)
+        _fail('Could not start speech playback.');
+    }
+  }
+
+  void _resumeAfterAnswer(int generation) {
+    _retry?.cancel();
+    _retry = Timer(echoTail, () {
+      _retry = null;
+      if (_valid(generation)) unawaited(_listen(generation));
+    });
+  }
+
   void _onTts(Map<String, dynamic> event) {
     if (_disposed || !_running || event['id'] != _ttsId) return;
     if (_scope != currentScope()) {
@@ -311,17 +391,26 @@ class AssistantSession extends ChangeNotifier {
     }
     switch (event['type']) {
       case 'started':
+        if (_firstAudio) {
+          _firstAudio = false;
+          debugPrint(
+              'AnxAssistantTiming: first_audio_ms=${_answerTiming?.elapsedMilliseconds}');
+        }
         state = AssistantState.speaking;
         status = 'Reading the response aloud…';
         _notify();
       case 'completed':
         _ttsId = null;
         final generation = _generation;
-        _retry?.cancel();
-        _retry = Timer(echoTail, () {
-          _retry = null;
-          if (_valid(generation)) unawaited(_listen(generation));
-        });
+        if (_speechQueue.isNotEmpty) {
+          unawaited(_speakNext(generation));
+        } else if (_answerDone) {
+          _resumeAfterAnswer(generation);
+        } else {
+          state = AssistantState.thinking;
+          status = 'Waiting for the next sentence…';
+          _notify();
+        }
       case 'error':
         _fail(
           event['code'] == 'language_unavailable'
@@ -345,16 +434,18 @@ class AssistantSession extends ChangeNotifier {
       ? value.substring(0, value.length.clamp(0, 4000)).trim()
       : '';
   String _speechError(dynamic code) => switch (code) {
-    'permission_denied' =>
-      'The assistant needs microphone access. Allow it for Anx in Android settings and try again.',
-    'recognizer_unavailable' => 'Android speech recognition is unavailable.',
-    'language_unavailable' => 'This language is unavailable for Android speech recognition.',
-    'network' =>
-      'Speech recognition network error. Tap Resume to try again.',
-    'busy' =>
-      'The microphone or recognizer is busy. Finish the other recording and try again.',
-    _ => 'Speech recognition was interrupted. Tap Resume to try again.',
-  };
+        'permission_denied' =>
+          'The assistant needs microphone access. Allow it for Anx in Android settings and try again.',
+        'recognizer_unavailable' =>
+          'Android speech recognition is unavailable.',
+        'language_unavailable' =>
+          'This language is unavailable for Android speech recognition.',
+        'network' =>
+          'Speech recognition network error. Tap Resume to try again.',
+        'busy' =>
+          'The microphone or recognizer is busy. Finish the other recording and try again.',
+        _ => 'Speech recognition was interrupted. Tap Resume to try again.',
+      };
   @override
   void dispose() {
     if (_disposed) return;

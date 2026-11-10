@@ -32,6 +32,7 @@ void main() {
       var bookTaps = 0;
       var hintsOpened = 0;
       var illustrationsOpened = 0;
+      var reusePrevious = true;
       final turn = BookAssistantTurn(
         prepare: () async {},
         context: () async => null,
@@ -70,6 +71,7 @@ void main() {
                       history: () {},
                       hints: () => hintsOpened++,
                       illustrations: () => illustrationsOpened++,
+                      onReusePreviousChat: (value) => reusePrevious = value,
                     ),
                   ),
                 ],
@@ -123,6 +125,11 @@ void main() {
       await tester.tap(find.text('Illustrations'));
       await tester.pumpAndSettle();
       expect(illustrationsOpened, 1);
+      await tester.tap(find.byTooltip('Assistant menu'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reuse previous chat'));
+      await tester.pumpAndSettle();
+      expect(reusePrevious, false);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       session.dispose();

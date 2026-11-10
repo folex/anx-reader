@@ -18,6 +18,8 @@ class FloatingBookAssistant extends StatefulWidget {
     this.illustrations,
     this.draft,
     this.revision = 0,
+    this.reusePreviousChat = true,
+    this.onReusePreviousChat,
   });
   final AssistantSession session;
   final BookAssistantTurn turn;
@@ -27,6 +29,8 @@ class FloatingBookAssistant extends StatefulWidget {
   final VoidCallback? hints, illustrations;
   final String? draft;
   final int revision;
+  final bool reusePreviousChat;
+  final ValueChanged<bool>? onReusePreviousChat;
   @override
   State<FloatingBookAssistant> createState() => _FloatingBookAssistantState();
 }
@@ -162,7 +166,15 @@ class _FloatingBookAssistantState extends State<FloatingBookAssistant>
                           style: theme.textTheme.titleSmall,
                         ),
                       ),
-                      if (active)
+                      if (active &&
+                          (widget.session.state == AssistantState.speaking ||
+                              widget.session.state == AssistantState.thinking))
+                        IconButton(
+                          tooltip: 'Interrupt and speak',
+                          onPressed: widget.session.interrupt,
+                          icon: const Icon(Icons.front_hand_outlined),
+                        )
+                      else if (active)
                         IconButton(
                           tooltip: widget.session.state ==
                                       AssistantState.paused ||
@@ -201,12 +213,22 @@ class _FloatingBookAssistantState extends State<FloatingBookAssistant>
                       PopupMenuButton<String>(
                         tooltip: 'Assistant menu',
                         onSelected: (value) {
+                          if (value == 'reuse')
+                            widget.onReusePreviousChat
+                                ?.call(!widget.reusePreviousChat);
                           if (value == 'hints') widget.hints?.call();
                           if (value == 'illustrations')
                             widget.illustrations?.call();
                           if (value == 'close') widget.close();
                         },
                         itemBuilder: (_) => [
+                          CheckedPopupMenuItem(
+                            value: 'reuse',
+                            checked: widget.reusePreviousChat,
+                            enabled:
+                                !busy && widget.onReusePreviousChat != null,
+                            child: const Text('Reuse previous chat'),
+                          ),
                           if (widget.hints != null)
                             const PopupMenuItem(
                               value: 'hints',
@@ -438,8 +460,18 @@ class _FloatingBookAssistantState extends State<FloatingBookAssistant>
                         dimension: size,
                         child: IconButton(
                           key: const ValueKey('assistant-bubble'),
-                          tooltip: 'Open assistant: $_status',
-                          onPressed: () => setState(() => _minimized = false),
+                          tooltip:
+                              widget.session.state == AssistantState.speaking ||
+                                      widget.session.state ==
+                                          AssistantState.thinking
+                                  ? 'Interrupt and speak'
+                                  : 'Open assistant: $_status',
+                          onPressed:
+                              widget.session.state == AssistantState.speaking ||
+                                      widget.session.state ==
+                                          AssistantState.thinking
+                                  ? widget.session.interrupt
+                                  : () => setState(() => _minimized = false),
                           icon: Icon(
                             widget.session.state == AssistantState.paused
                                 ? Icons.mic_off_outlined

@@ -109,7 +109,8 @@ void main() {
     'pause while thinking fences the late model result and cancels its request',
     () async {
       await session.start();
-      speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Pregunta');
+      speech.event(speech.id('startAssistantListening'), 'transcript',
+          text: 'Pregunta');
       await drain();
       await session.pause();
       answer.complete('Late answer');
@@ -119,6 +120,96 @@ void main() {
       expect(cancels, greaterThanOrEqualTo(2));
     },
   );
+  test(
+      'streamed first sentence speaks before generation finishes; later speech queues without flushing it',
+      () async {
+    session.dispose();
+    late void Function(String) partial;
+    session = AssistantSession(
+        speech: speech,
+        tts: tts,
+        currentScope: () => scope,
+        sendQuestion: (_) => answer.future,
+        sendStreamingQuestion: (_, update) {
+          partial = update;
+          return answer.future;
+        },
+        echoTail: Duration.zero);
+    await session.start();
+    speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+    await drain();
+    partial('Это достаточно длинное первое предложение. След');
+    await drain();
+    expect(answer.isCompleted, false);
+    expect(tts.count('speak'), 1);
+    expect(
+        tts.calls.last['text'], 'Это достаточно длинное первое предложение.');
+    final first = tts.id('speak');
+    partial(
+        'Это достаточно длинное первое предложение. Следующее тоже готово.');
+    answer.complete(
+        'Это достаточно длинное первое предложение. Следующее тоже готово.');
+    await drain();
+    expect(tts.count('speak'), 1);
+    tts.event(first, 'completed');
+    await drain();
+    expect(tts.count('speak'), 2);
+    expect(tts.calls.last['text'], 'Следующее тоже готово.');
+    expect(speech.count('startAssistantListening'), 1);
+    tts.event(tts.id('speak'), 'completed');
+    await drain();
+    expect(speech.count('startAssistantListening'), 2);
+  });
+  test(
+      'stream rollback stops stale speech before reading the corrected response',
+      () async {
+    session.dispose();
+    late void Function(String) partial;
+    session = AssistantSession(
+        speech: speech,
+        tts: tts,
+        currentScope: () => scope,
+        sendQuestion: (_) => answer.future,
+        sendStreamingQuestion: (_, update) {
+          partial = update;
+          return answer.future;
+        },
+        echoTail: Duration.zero);
+    await session.start();
+    speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+    await drain();
+    partial('A sufficiently long old sentence.');
+    await drain();
+    final old = tts.id('speak');
+    partial('');
+    await drain();
+    expect(tts.count('stop'), 1);
+    partial('A sufficiently long corrected sentence.');
+    answer.complete('A sufficiently long corrected sentence.');
+    await drain();
+    expect(tts.count('speak'), 2);
+    expect(tts.calls.last['text'], 'A sufficiently long corrected sentence.');
+    tts.event(old, 'completed');
+    await drain();
+    expect(session.state, AssistantState.speaking);
+  });
+  test(
+      'interrupt stops speech and fences remaining streamed output before reopening the microphone',
+      () async {
+    await session.start();
+    speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+    await drain();
+    answer.complete('Answer');
+    await drain();
+    final old = tts.id('speak');
+    await session.interrupt();
+    await drain();
+    expect(tts.count('stop'), 1);
+    expect(session.state, AssistantState.listening);
+    tts.event(old, 'completed');
+    await drain();
+    expect(speech.count('startAssistantListening'), 2);
+  });
   test(
     'book/account switch pauses and cannot resume into the new context',
     () async {
@@ -138,7 +229,8 @@ void main() {
     'background during speech stops TTS and never restarts the microphone',
     () async {
       await session.start();
-      speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Question');
+      speech.event(speech.id('startAssistantListening'), 'transcript',
+          text: 'Question');
       await drain();
       answer.complete('Answer');
       await drain();
@@ -155,7 +247,8 @@ void main() {
     'resume waits pending TTS stop acknowledgement before opening microphone',
     () async {
       await session.start();
-      speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Question');
+      speech.event(speech.id('startAssistantListening'), 'transcript',
+          text: 'Question');
       await drain();
       answer.complete('Answer');
       await drain();
@@ -220,7 +313,8 @@ void main() {
     'TTS failure stops the cycle without another model or ASR turn',
     () async {
       await session.start();
-      speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+      speech.event(speech.id('startAssistantListening'), 'transcript',
+          text: 'Q');
       await drain();
       answer.complete('A');
       await drain();
@@ -257,7 +351,8 @@ void main() {
         if (method == 'speak') await accepted.future;
       };
       await session.start();
-      speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+      speech.event(speech.id('startAssistantListening'), 'transcript',
+          text: 'Q');
       await drain();
       answer.complete('A');
       await drain();
@@ -279,7 +374,8 @@ void main() {
         'Ответ\nслово ссылка',
       );
       await session.start();
-      speech.event(speech.id('startAssistantListening'), 'transcript', text: 'Q');
+      speech.event(speech.id('startAssistantListening'), 'transcript',
+          text: 'Q');
       await drain();
       answer.complete('a' * 32001);
       await drain();

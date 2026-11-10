@@ -89,6 +89,7 @@ class ReadingPageState extends ConsumerState<ReadingPage>
   String? _selectionCfi;
   late final BookAssistantTurn _assistantTurn;
   late final AssistantSession _assistant;
+  int _voiceRequestNumber = 0;
   bool _floatingChatVisible = false;
   bool _voiceOwnsTurn = false;
   final Object _assistantRequestOwner = Object();
@@ -142,6 +143,17 @@ class ReadingPageState extends ConsumerState<ReadingPage>
         prepare: () =>
             ref.read(aiChatProvider.notifier).ensureSessionForVoice(),
       );
+
+  Future<String> _sendVoiceQuestion(String question,
+      {void Function(String)? onReply}) async {
+    final number = ++_voiceRequestNumber;
+    _voiceOwnsTurn = true;
+    try {
+      return await _assistantTurn.send(question, onReply: onReply);
+    } finally {
+      if (number == _voiceRequestNumber) _voiceOwnsTurn = false;
+    }
+  }
 
   void _assistantContextChanged() {
     if (!mounted) return;
@@ -334,14 +346,9 @@ class ReadingPageState extends ConsumerState<ReadingPage>
       cancelQuestion: () {
         if (_voiceOwnsTurn) _assistantTurn.cancel();
       },
-      sendQuestion: (question) async {
-        _voiceOwnsTurn = true;
-        try {
-          return await _assistantTurn.send(question);
-        } finally {
-          _voiceOwnsTurn = false;
-        }
-      },
+      sendQuestion: (question) => _sendVoiceQuestion(question),
+      sendStreamingQuestion: (question, onReply) =>
+          _sendVoiceQuestion(question, onReply: onReply),
     );
     ChatGptPlan.instance.addListener(_assistantContextChanged);
 
@@ -1229,6 +1236,11 @@ class ReadingPageState extends ConsumerState<ReadingPage>
                         session: _assistant,
                         turn: _assistantTurn,
                         scope: _assistantScope,
+                        reusePreviousChat: Prefs().assistantReusePreviousChat,
+                        onReusePreviousChat: (value) async {
+                          await Prefs().setAssistantReusePreviousChat(value);
+                          if (mounted) setState(() {});
+                        },
                         startVoice: _startBookVoice,
                         close: _closeBookAssistant,
                         hints: _showReadingHints,

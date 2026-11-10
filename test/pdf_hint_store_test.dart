@@ -43,6 +43,45 @@ void main() {
         'anger');
     expect(await pdf.readAsBytes(), original);
   });
+  test('PDF reopen retains overwrite history without reviving the old hint',
+      () async {
+    final store = PdfHintStore();
+    final snap = await store.read(pdf);
+    await store.commit(
+        snapshot: snap,
+        pages: {
+          'pdf:page:1': [
+            {...record, 'superseded': true},
+            {
+              ...record,
+              'spec': {
+                ...record['spec'] as Map,
+                'operationId': 'n2',
+                'mode': 'overwrite',
+                'text': 'replacement'
+              }
+            }
+          ]
+        },
+        isCurrent: () => true);
+    final saved = (await PdfHintStore().read(pdf)).pages['pdf:page:1']!;
+    expect(saved.length, 2);
+    expect(
+        saved.where((item) => item['superseded'] != true).single['spec']
+            ['text'],
+        'replacement');
+    final current = await store.read(pdf);
+    await expectLater(
+        store.commit(
+            snapshot: current,
+            pages: {
+              'pdf:page:1': [
+                {...record, 'superseded': 'true'}
+              ]
+            },
+            isCurrent: () => true),
+        throwsFormatException);
+  });
   test(
       'stale concurrent snapshots and changed PDF cannot overwrite saved notes',
       () async {

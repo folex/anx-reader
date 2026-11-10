@@ -1,0 +1,72 @@
+<meta charset="utf-8"><script type="module">
+import {prepareEpubEdit,prepareEpubEditForBridge,textMap} from '../src/epub-edit.js';
+import {preparePdfEdits,renderPdfHints} from '../src/pdf-hints.js';
+window.runTests=async()=>{
+const checks=[],check=(name,ok)=>checks.push({name,ok:!!ok});
+const parse=x=>new DOMParser().parseFromString(x,'application/xhtml+xml');
+const source='<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>La lluvia cae. La lluvia vuelve.</p></body></html>';
+const base={quote:'lluvia',contextBefore:'La',contextAfter:'cae.',text:'old',tags:{topic:['old']}};
+let x=source;
+for(const type of ['ruby','footnote','highlight'])x=(await prepareEpubEdit(x,{...base,type,operationId:'old-'+type},'test')).xhtml;
+const noteSpec={...base,type:'footnote',operationId:'new-note',mode:'overwrite',text:'new note',tags:{topic:['new']}};
+x=(await prepareEpubEdit(x,noteSpec,'test')).xhtml;
+let d=parse(x);
+check('EPUB footnote overwrite replaces only the note at the same anchor',d.querySelectorAll('aside').length===2&&!d.getElementById('anx-note-old-footnote')&&d.getElementById('anx-note-old-highlight')&&d.querySelectorAll('ruby').length===1&&d.getElementById('anx-note-new-note').textContent==='new note');
+const highlight={...base,type:'highlight',operationId:'new-highlight',mode:'overwrite',color:'#ff0000',text:'',tags:{topic:['new']}};
+x=(await prepareEpubEdit(x,highlight,'test')).xhtml;d=parse(x);
+check('EPUB highlight overwrite changes color and clears only its optional comment',d.querySelectorAll('[data-anx-hint-highlight]').length===1&&d.querySelector('[data-anx-hint-highlight]').getAttribute('style').includes('#ff0000')&&!d.getElementById('anx-note-old-highlight')&&d.getElementById('anx-note-new-note')&&d.querySelector('ruby rt').textContent==='old');
+check('EPUB overwrite preserves original text and new tags',textMap(d.querySelector('p')).text==='La lluvia cae. La lluvia vuelve.'&&d.querySelector('[data-anx-hint-highlight]').getAttribute('data-anx-hint-tags').includes('new'));
+const replay=await prepareEpubEdit(x,{...base,type:'highlight',operationId:'old-highlight'},'test');check('Overwritten operation retry never revives the old annotation',replay.unchanged);
+const readd=await prepareEpubEdit(x,{...base,type:'highlight',operationId:'readded'},'test');check('Superseded old highlight can be added again with a new id',!readd.unchanged&&parse(readd.xhtml).querySelectorAll('[data-anx-hint-highlight]').length===2);
+const second=await prepareEpubEdit(x,{type:'footnote',operationId:'second-note',quote:'lluvia',contextBefore:'La',occurrence:2,text:'second'},'test');
+const firstAgain=await prepareEpubEdit(second.xhtml,{...noteSpec,operationId:'first-again',text:'updated'},'test');d=parse(firstAgain.xhtml);
+check('EPUB exact occurrence leaves the other occurrence intact',d.getElementById('anx-note-second-note')?.textContent==='second'&&d.querySelectorAll('aside').length===2);
+// Exercise old persisted highlight spans without operation ids.
+const legacy=parse(x);legacy.querySelectorAll('[data-anx-edit-wrap="highlight"]').forEach(n=>n.removeAttribute('data-anx-edit-id'));
+const legacyResult=await prepareEpubEdit(new XMLSerializer().serializeToString(legacy),{...highlight,operationId:'legacy-replace',color:'#00ff00'},'test');
+check('Legacy EPUB highlight spans are safely replaced without nested markup loss',parse(legacyResult.xhtml).querySelectorAll('[data-anx-hint-highlight]').length===1&&parse(legacyResult.xhtml).querySelectorAll('ruby').length===1);
+const repeat=await prepareEpubEdit(readd.xhtml,{...highlight,operationId:'overwrite-same-again'},'test');
+check('Overwrite still removes other annotations when its payload matches an active replacement',parse(repeat.xhtml).querySelectorAll('[data-anx-hint-highlight]').length===1);
+let overlap=(await prepareEpubEdit(source,{type:'highlight',operationId:'broad',quote:'La lluvia',contextAfter:'cae.',text:'broad'},'test')).xhtml;
+overlap=(await prepareEpubEdit(overlap,{...base,type:'highlight',operationId:'narrow'},'test')).xhtml;
+const overlapDoc=parse(overlap);overlapDoc.querySelectorAll('[data-anx-edit-wrap="highlight"]').forEach(n=>n.removeAttribute('data-anx-edit-id'));
+const untouched=new XMLSerializer().serializeToString(overlapDoc);
+const failed=await prepareEpubEditForBridge(untouched,{items:[{...noteSpec,operationId:'cancel-note'},{...highlight,operationId:'ambiguous-replace'}]},'test');
+check('Ambiguous legacy highlight ownership rejects the entire batch without output XHTML',failed.editError==='legacy_overlap'&&!failed.xhtml&&new XMLSerializer().serializeToString(overlapDoc)===untouched);
+const paragraph='La lluvia caía sobre las calles vacías. Marta decidió volver a casa antes del anochecer. Aunque estaba cansada, siguió caminando sin detenerse.';
+const wordSpecs=[...paragraph.matchAll(/\p{L}+/gu)].map((m,i)=>({type:'ruby',operationId:'dense-r-'+i,quote:m[0],contextBefore:paragraph.slice(0,m.index).trim(),contextAfter:paragraph.slice(m.index+m[0].length).trim(),text:'word'}));
+const highSpecs=wordSpecs.filter((_,i)=>i%2===1).map((r,i)=>({...r,type:'highlight',operationId:'dense-h-'+i,text:'comment'}));
+const sentences=[...paragraph.matchAll(/[^.]+\./gu)].map((m,i)=>({type:'footnote',operationId:'dense-n-'+i,quote:m[0].trim(),contextBefore:paragraph.slice(0,m.index).trim(),contextAfter:paragraph.slice(m.index+m[0].length).trim(),text:'old sentence'}));
+const denseSource='<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>'+paragraph+'</p></body></html>';
+let dense=(await prepareEpubEdit(denseSource,{items:[...wordSpecs,...highSpecs,...sentences]},'dense')).xhtml;
+const denseDoc=parse(dense);denseDoc.querySelectorAll('[data-anx-edit-wrap="highlight"]').forEach(n=>n.removeAttribute('data-anx-edit-id'));
+dense=(await prepareEpubEdit(new XMLSerializer().serializeToString(denseDoc),{items:[...sentences.map(n=>({...n,operationId:n.operationId+'-new',mode:'overwrite',text:'new sentence'})),...highSpecs.map(h=>({...h,operationId:h.operationId+'-new',mode:'overwrite',color:'#abcdef',text:''}))]},'dense')).xhtml;
+const resultDoc=parse(dense);
+check('Dense paragraph overwrites 3 sentence notes and 11 legacy commented highlights preserving 22 ruby words',resultDoc.querySelectorAll('ruby').length===22&&resultDoc.querySelectorAll('[data-anx-hint-highlight]').length===11&&resultDoc.querySelectorAll('[data-anx-ai-ref]').length===3&&resultDoc.querySelectorAll('aside').length===3&&textMap(resultDoc.querySelector('p')).text===paragraph);
+const frame=document.createElement('iframe');document.body.append(frame);const pdf=frame.contentDocument;
+pdf.open();pdf.write('<html data-anx-pdf-page="1"><head><style>.textLayer{font:24px sans-serif}</style></head><body><div class="textLayer">La lluvia cae. La lluvia vuelve.</div></body></html>');pdf.close();
+for(const type of ['ruby','footnote','highlight']){
+const old={...base,type,operationId:'pdf-old-'+type,color:'#00ff00'};
+let prepared=await preparePdfEdits(pdf,old,[]);
+const oldRecords=JSON.stringify(prepared.records);
+const replace={...old,operationId:'pdf-new-'+type,mode:'overwrite',text:type==='highlight'?'':'new',color:'#ff0000',tags:{topic:['new']}};
+prepared=await preparePdfEdits(pdf,replace,prepared.records);
+check('PDF '+type+' overwrite supersedes exactly one annotation',prepared.records.length===2&&prepared.records.filter(r=>!r.superseded).length===1);
+let popup='';await renderPdfHints(pdf,prepared.records,text=>popup=text);
+check('PDF '+type+' render excludes superseded annotations',pdf.querySelectorAll(type==='highlight'?'span[data-anx-pdf-hint="highlight"]':'[data-anx-pdf-hint="'+type+'"]').length===1);
+if(type==='highlight')check('PDF highlight overwrite clears stale comment controls',!pdf.querySelector('button[data-anx-pdf-hint="highlight"]')&&!pdf.querySelector('[role="button"]'));
+else if(type==='footnote'){pdf.querySelector('button[data-anx-pdf-hint="footnote"]').click();check('PDF note popup uses only the replacement comment',popup==='new');}
+const retry=await preparePdfEdits(pdf,old,prepared.records);check('PDF '+type+' old operation remains idempotent',!retry.changed&&retry.records.filter(r=>!r.superseded).length===1);
+const same=await preparePdfEdits(pdf,{...old,operationId:'pdf-return-'+type},prepared.records);check('PDF '+type+' old payload can be added with a fresh id',same.records.filter(r=>!r.superseded).length===2);
+const snapshot=JSON.stringify(prepared.records);let failed=false;try{await preparePdfEdits(pdf,{items:[{...replace,operationId:'failed-'+type},{...replace,operationId:'missing-'+type,quote:'absent'}]},prepared.records)}catch{failed=true}
+check('PDF '+type+' failed batch does not mutate prior records',failed&&JSON.stringify(prepared.records)===snapshot);
+}
+let current=await preparePdfEdits(pdf,{...base,type:'ruby',operationId:'actual-word'},[]);
+current=await preparePdfEdits(pdf,{type:'ruby',operationId:'second-occurrence',quote:'lluvia',contextBefore:'La',occurrence:2,text:'second'},current.records);
+current=await preparePdfEdits(pdf,{type:'footnote',operationId:'other-type',quote:'lluvia',contextBefore:'La',contextAfter:'cae.',text:'independent'},current.records);
+current=await preparePdfEdits(pdf,{type:'ruby',operationId:'phrase-word',quote:'La lluvia',contextAfter:'cae.',alignment:'right',mode:'overwrite',text:'new'},current.records);
+check('PDF ruby overwrite matches actual selected word and preserves other occurrences and types',current.activeCount===3&&current.records.find(r=>r.spec.operationId==='actual-word').superseded&&current.records.find(r=>r.spec.operationId==='second-occurrence').superseded!==true&&current.records.find(r=>r.spec.operationId==='other-type').superseded!==true);
+await renderPdfHints(pdf,JSON.parse(JSON.stringify(current.records)),()=>{});
+check('PDF JSON roundtrip and reopen render only active annotations',pdf.querySelectorAll('[data-anx-pdf-hint="ruby"]').length===2&&pdf.querySelectorAll('button[data-anx-pdf-hint="footnote"]').length===1);
+return {ok:checks.every(x=>x.ok),checks,metrics:[]};
+};</script>

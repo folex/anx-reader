@@ -35,15 +35,27 @@ function anchorRange(doc, anchor, start = anchor.rawStart, end = anchor.rawEnd) 
     return range
 }
 
+function effectiveAnchor(spec, anchor) {
+    if (spec.type !== 'ruby') return anchor
+    const words = [...spec.quote.matchAll(/\S+/gu)]
+    const word = spec.alignment === 'right' ? words.at(-1) : spec.alignment === 'center' ? words[Math.floor((words.length - 1) / 2)] : words[0]
+    return { ...anchor, start: anchor.start + word.index, end: anchor.start + word.index + word[0].length }
+}
+
+function sameAnchor(a, b) {
+    return a.paragraphHash === b.paragraphHash && a.paragraphIndex === b.paragraphIndex && a.start === b.start && a.end === b.end
+}
+
 // Pure preparation: every anchor must resolve before Flutter saves anything.
 export async function preparePdfEdits(doc, input, records) {
     if (!doc?.documentElement.hasAttribute('data-anx-pdf-page')) throw new Error('The current page is not a PDF')
     if (!Array.isArray(records) || records.length > 5000) throw new Error('Invalid PDF annotation data')
     const items = input.items ?? [input]
     if (!Array.isArray(items) || !items.length || items.length > 50) throw new Error('Invalid annotation batch')
-    const next = [...records], results = []
+    const next = records.map(record => ({ ...record })), results = []
     for (const item of items) {
         const spec = validateEpubEdit(item)
+        if (spec.type === 'ruby' && spec.mode === 'append') throw new Error('Ruby append is currently supported only in EPUB')
         const requestHash = await digest(JSON.stringify(spec))
         const prior = next.find(x => x.spec.operationId === spec.operationId)
         if (prior) {
@@ -55,11 +67,16 @@ export async function preparePdfEdits(doc, input, records) {
         if (!anchorRange(doc, anchor).getClientRects().length) throw new Error('PDF phrase has no visible text geometry')
         const stable = { paragraphHash: anchor.paragraphHash, paragraphIndex: anchor.paragraphIndex,
             start: anchor.start, end: anchor.end, quote: spec.quote }
+        if (spec.mode === 'overwrite') {
+            const target = effectiveAnchor(spec, stable)
+            for (const record of next) if (!record.superseded && record.spec.type === spec.type &&
+                sameAnchor(effectiveAnchor(record.spec, record.anchor), target)) record.superseded = true
+        }
         const record = { spec, requestHash, anchor: stable }
         next.push(record)
         results.push({ changed: true, operationId: spec.operationId, anchor: stable })
     }
-    return { records: next, items: results, changed: results.some(x => x.changed) }
+    return { records: next, items: results, changed: results.some(x => x.changed), activeCount: next.filter(record => !record.superseded).length }
 }
 
 // All geometry stays in the PDF page's local coordinates; the fixed-layout
@@ -72,6 +89,7 @@ export async function renderPdfHints(doc, records, showComment) {
     root.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:5;overflow:visible'
     let number = 0
     for (const record of records) {
+        if (record.superseded) continue
         const spec = validateEpubEdit(record.spec)
         const anchor = await findEpubEditAnchor(doc, { ...spec,
             paragraphHash: record.anchor.paragraphHash, paragraphIndex: record.anchor.paragraphIndex })

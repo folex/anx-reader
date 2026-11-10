@@ -6,7 +6,17 @@ import 'package:flutter/foundation.dart';
 Future<void> prepareBookAssistantIdentity({
   required String Function() identity,
   required Future<void> Function() prepare,
+  Future<void> Function()? initialize,
+  String Function()? initializationIdentity,
 }) async {
+  if (initialize != null) {
+    final guard = initializationIdentity ?? identity;
+    final beforeInitialization = guard();
+    await initialize();
+    if (guard() != beforeInitialization) {
+      throw StateError('The book or account changed. Ask again.');
+    }
+  }
   final expected = identity();
   await prepare();
   if (identity() != expected)

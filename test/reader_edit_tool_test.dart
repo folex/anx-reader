@@ -46,6 +46,28 @@ void main() {
       'right',
     );
   });
+  test('ruby supports explicit append and overwrite in one batch', () {
+    final batch = parseReaderEditInput({
+      'items': [
+        {...valid, 'mode': 'append'},
+        {...valid, 'operationId': 'replace', 'mode': 'overwrite'},
+      ],
+    }, ruby: true);
+    expect(batch['items'][0]['mode'], 'append');
+    expect(batch['items'][1]['mode'], 'overwrite');
+    expect(() => parseReaderEditInput({...valid, 'mode': 'delete'}, ruby: true),
+        throwsFormatException);
+    for (final highlight in [false, true]) {
+      expect(
+          parseReaderEditInput({...valid, 'mode': 'overwrite'},
+              ruby: false, highlight: highlight)['mode'],
+          'overwrite');
+      expect(
+          parseReaderEditInput({...valid, 'mode': 'append'},
+              ruby: false, highlight: highlight)['mode'],
+          'append');
+    }
+  });
   test('ambiguous, unbounded and arbitrary fields are rejected', () {
     for (final input in [
       {...valid}..remove('contextBefore'),
@@ -114,19 +136,30 @@ void main() {
       );
   });
   test('all three bounded mutation tools are exposed to voice', () {
-    expect(readerEditToolIds, ['add_book_footnote', 'add_book_ruby', 'add_book_highlight']);
+    expect(readerEditToolIds,
+        ['add_book_footnote', 'add_book_ruby', 'add_book_highlight']);
     expect(
       (readerEditSchema(ruby: true)['properties'] as Map)['text']['maxLength'],
       32,
     );
   });
-  test('highlight accepts a color and optional comment in single or batch input', () {
+  test(
+      'highlight accepts a color and optional comment in single or batch input',
+      () {
     final input = {...valid, 'color': '#40a0ff'}..remove('text');
     final parsed = parseReaderEditInput(input, ruby: false, highlight: true);
     expect(parsed['type'], 'highlight');
     expect(parsed['color'], '#40a0ff');
-    final batch = parseReaderEditInput({'items': [input, {...valid, 'operationId': 'hi-2', 'text': 'Useful contrast'}]}, ruby: false, highlight: true);
+    final batch = parseReaderEditInput({
+      'items': [
+        input,
+        {...valid, 'operationId': 'hi-2', 'text': 'Useful contrast'}
+      ]
+    }, ruby: false, highlight: true);
     expect(batch['items'][1]['text'], 'Useful contrast');
-    expect(() => parseReaderEditInput({...input, 'color': 'url(x)'}, ruby: false, highlight: true), throwsFormatException);
+    expect(
+        () => parseReaderEditInput({...input, 'color': 'url(x)'},
+            ruby: false, highlight: true),
+        throwsFormatException);
   });
 }

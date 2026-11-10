@@ -107,6 +107,13 @@ Map<String, dynamic> _readerEditSingleSchema(
           'description':
               'Optional arbitrary categories with values, e.g. {"difficulty":["C1"],"topic":["food"],"grammar":["subjunctive"]}. User-defined categories/levels are allowed. These are filterable tags, not inferred certainty. Use the user requested vocabulary; do not guess CEFR difficulty. Category names max32 characters. Untagged legacy hints keep their original levels.',
         },
+        'mode': {
+          'type': 'string',
+          'enum': ['append', 'overwrite'],
+          'description': ruby
+              ? 'overwrite replaces existing ruby at this verified word in EPUB or PDF. append keeps existing glosses and adds this one (EPUB only). Omit to reject EPUB ruby overlap. Use one items batch for a paragraph.'
+              : 'overwrite replaces existing annotations of THIS SAME TYPE at this exact verified range, preserving other types and other occurrences. For highlights it also clears the old optional comment when the new text is omitted. append or omission adds an annotation.',
+        },
         if (ruby)
           'alignment': {
             'type': 'string',
@@ -158,6 +165,7 @@ Map<String, dynamic> readerEditSchema(
               'tier',
               'tags',
               'alignment',
+              'mode',
               'color',
             ])
               {

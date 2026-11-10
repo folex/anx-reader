@@ -52,6 +52,7 @@ void main() {
           home: MediaQuery(
             data: const MediaQueryData(
               size: Size(320, 700),
+              disableAnimations: true,
               textScaler: TextScaler.linear(1.5),
             ),
             child: Scaffold(

@@ -107,12 +107,14 @@ Stream<String> chatGptToolLoop({
                 'ChatGPT did not finish the response. Try again.',
               );
             case 'error':
-              throw chatGptApiError({'error': event});
+              throw chatGptApiError({'error': event['error'] ?? event});
           }
         }
         break;
       } on IOException catch (error) {
-        if (error is! HttpException && error is! SocketException) rethrow;
+        if (error is! HttpException &&
+            error is! SocketException &&
+            error is! WebSocketException) rethrow;
         guard();
         if (attempt >= 1) rethrow;
         // Retry only generation of this response. Previously saved tool

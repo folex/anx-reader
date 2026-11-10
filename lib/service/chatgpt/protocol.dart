@@ -17,8 +17,8 @@ String randomOAuthValue([int length = 32]) {
 }
 
 String pkceChallenge(String verifier) => base64UrlEncode(
-  sha256.convert(ascii.encode(verifier)).bytes,
-).replaceAll('=', '');
+      sha256.convert(ascii.encode(verifier)).bytes,
+    ).replaceAll('=', '');
 
 /// This error deliberately excludes raw server descriptions, headers and tokens.
 ChatGptError chatGptApiError(dynamic body, {int? status}) {
@@ -26,8 +26,8 @@ ChatGptError chatGptApiError(dynamic body, {int? status}) {
   final code = error is Map ? error['code'] ?? error['type'] : error;
   final safeCode =
       code is String && RegExp(r'^[a-zA-Z0-9_]{1,100}$').hasMatch(code)
-      ? code
-      : 'request_failed';
+          ? code
+          : 'request_failed';
   if (safeCode == 'subscription_sharing_usage_limit_exceeded') {
     return const ChatGptError(
       'ChatGPT subscription limit reached. Try later.',
@@ -89,7 +89,7 @@ Stream<String> chatGptText(Stream<Map<String, dynamic>> events) async* {
       case 'response.failed':
         throw chatGptApiError(event['response']);
       case 'error':
-        throw chatGptApiError({'error': event});
+        throw chatGptApiError({'error': event['error'] ?? event});
       case 'response.incomplete':
         throw const ChatGptError(
           'ChatGPT did not finish the response. Try again.',
@@ -97,7 +97,8 @@ Stream<String> chatGptText(Stream<Map<String, dynamic>> events) async* {
     }
   }
   if (!completed) {
-    throw const ChatGptError('Connection interrupted before the response completed.');
+    throw const ChatGptError(
+        'Connection interrupted before the response completed.');
   }
 }
 

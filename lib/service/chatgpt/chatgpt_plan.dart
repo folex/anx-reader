@@ -1,5 +1,6 @@
 import 'oauth_foreground_gate.dart';
 import 'secure_transport.dart';
+import 'responses_socket.dart';
 import 'network_error.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -83,6 +84,7 @@ class ChatGptPlan extends ChangeNotifier {
   Future<void> _writes = Future.value();
   final Map<String, Future<void>> _refreshes = {};
   final Set<HttpClient> _requests = {};
+  final Set<ChatGptResponsesSocket> _responseSockets = {};
   HttpServer? _callback;
   Completer<Uri>? _pendingCallback;
   OAuthForegroundGate? _pendingForeground;
@@ -221,6 +223,10 @@ class ChatGptPlan extends ChangeNotifier {
 
   void cancelRequests() {
     requestRevision++;
+    for (final socket in _responseSockets.toList()) {
+      socket.close();
+    }
+    _responseSockets.clear();
     for (final client in _requests.toList()) {
       client.close(force: true);
     }
@@ -579,6 +585,7 @@ class ChatGptPlan extends ChangeNotifier {
     final client = createChatGptHttpClient()
       ..connectionTimeout = const Duration(seconds: 30);
     _requests.add(client);
+    ChatGptResponsesSocket? responsesSocket;
     try {
       final input = <Map<String, dynamic>>[];
       final instructions = <String>[
@@ -599,43 +606,30 @@ class ChatGptPlan extends ChangeNotifier {
           revision == requestRevision &&
           identical(account, active) &&
           (toolScopeCurrent?.call() ?? true);
+      final connection = ChatGptResponsesSocket(
+        isCurrent: current,
+        onRequest: (continuation, count) => debugPrint(
+          'ChatGPT WebSocket: ${continuation ? 'continuation' : 'full'} input_items=$count',
+        ),
+        connect: () => WebSocket.connect(
+          chatGptResponsesWebSocketUrl,
+          headers: {HttpHeaders.authorizationHeader: 'Bearer $token'},
+          customClient: client,
+        ),
+      );
+      responsesSocket = connection;
+      _responseSockets.add(connection);
       Stream<Map<String, dynamic>> send(
         List<Map<String, dynamic>> items,
         List<Map<String, dynamic>> specs,
-      ) async* {
-        if (!current()) throw const ChatGptError('Request canceled.');
-        final request = await client.postUrl(Uri.parse('$_resource/responses'));
-        if (!current()) {
-          request.abort();
-          throw const ChatGptError('Request canceled.');
-        }
-        request.followRedirects = false;
-        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-        request.headers.contentType = ContentType.json;
-        request.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
-        request.write(
-          jsonEncode({
+      ) =>
+          connection.send(items, {
             'model': account.model,
             'instructions': instructions.join('\n\n'),
-            'input': items,
-            'store': false,
-            'stream': true,
             if (specs.isNotEmpty) 'tools': specs,
             if (specs.isNotEmpty) 'parallel_tool_calls': true,
             if (specs.isNotEmpty) 'include': ['reasoning.encrypted_content'],
-          }),
-        );
-        final response = await request.close().timeout(
-              const Duration(minutes: 2),
-            );
-        if (response.statusCode != 200) {
-          final body = await _readJson(response);
-          throw chatGptApiError(body, status: response.statusCode);
-        }
-        yield* decodeChatGptEvents(
-          response.timeout(const Duration(minutes: 2)),
-        );
-      }
+          });
 
       if (tools.isEmpty) {
         yield* chatGptText(send(input, const []));
@@ -663,6 +657,8 @@ class ChatGptPlan extends ChangeNotifier {
         );
       }
     } finally {
+      responsesSocket?.close();
+      _responseSockets.remove(responsesSocket);
       _requests.remove(client);
       client.close(force: true);
     }

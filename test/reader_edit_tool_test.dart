@@ -8,6 +8,32 @@ void main() {
     'contextBefore': 'una',
     'text': 'слово',
   };
+  test('ruby placement is validated and delete needs no replacement text', () {
+    final input = {...valid, 'position': 'below', 'alignment': 'left'};
+    final deletion = {...valid, 'mode': 'delete'}..remove('text');
+    final batch = parseReaderEditInput({
+      'items': [
+        input,
+        {...deletion, 'operationId': 'delete-1'}
+      ],
+    }, ruby: true);
+    expect(batch['items'][0]['position'], 'below');
+    expect(batch['items'][1]['mode'], 'delete');
+    expect(batch['items'][1].containsKey('text'), isFalse);
+    expect(parseReaderEditInput(deletion, ruby: false)['type'], 'footnote');
+    expect(parseReaderEditInput(deletion, ruby: false, highlight: true)['type'],
+        'highlight');
+    expect(
+        () => parseReaderEditInput({...input, 'position': 'sideways'},
+            ruby: true),
+        throwsFormatException);
+    expect(
+        () => parseReaderEditInput(input, ruby: false), throwsFormatException);
+    expect(() => parseReaderEditInput({...valid, 'mode': 'delete'}, ruby: true),
+        throwsFormatException);
+    expect(() => parseReaderEditInput({...valid}..remove('text'), ruby: true),
+        throwsFormatException);
+  });
   test('custom tag categories survive single and batch annotations', () {
     final tagged = {
       ...valid,

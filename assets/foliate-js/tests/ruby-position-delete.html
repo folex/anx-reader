@@ -1,0 +1,90 @@
+<!doctype html><meta charset="utf-8"><script type="module">
+import { prepareEpubEdit, textMap } from '../src/epub-edit.js'
+import { preparePdfEdits, renderPdfHints } from '../src/pdf-hints.js'
+
+window.runTests = async () => {
+    const checks = []
+    const check = (name, ok) => checks.push({ name, ok: !!ok })
+    const source = '<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>La <em>lluvia</em> cae. La lluvia vuelve.</p><p>Dice <ruby>hola<rt>hello</rt></ruby> otra vez.</p></body></html>'
+    const ruby = { type: 'ruby', operationId: 'first', quote: 'lluvia', contextAfter: 'cae.', text: 'rain' }
+    const other = { ...ruby, operationId: 'other', contextAfter: 'vuelve.' }
+    const footnote = { ...ruby, type: 'footnote', operationId: 'note', text: 'explanation' }
+    const highlight = { ...ruby, type: 'highlight', operationId: 'mark', text: 'comment' }
+    const change = { ...ruby, operationId: 'below', mode: 'overwrite', position: 'below' }
+    const deletion = (spec, id) => {
+        const { text, ...anchor } = spec
+        return { ...anchor, operationId: id, mode: 'delete' }
+    }
+    const parse = xhtml => new DOMParser().parseFromString(xhtml, 'application/xhtml+xml')
+    const mounted = xhtml => {
+        const frame = document.createElement('iframe')
+        document.body.appendChild(frame)
+        const doc = frame.contentDocument
+        doc.open(); doc.write(xhtml); doc.close()
+        return doc
+    }
+    const first = await prepareEpubEdit(source, { items: [ruby, other, footnote, highlight] }, 'ruby-test')
+    const docAbove = mounted(first.xhtml)
+    const upper = docAbove.querySelector('em ruby')
+    const rect = el => el.getBoundingClientRect()
+    const baseRect = ruby => {
+        const range = ruby.ownerDocument.createRange()
+        range.selectNodeContents(textMap(ruby).nodes[0].node)
+        return range.getBoundingClientRect()
+    }
+    check('EPUB defaults to above and left, including rendered alignment',
+        rect(upper.querySelector('rt')).top < baseRect(upper).top &&
+        Math.abs(rect(upper.querySelector('rt')).left - baseRect(upper).left) < 1 &&
+        docAbove.defaultView.getComputedStyle(upper).rubyAlign === 'start')
+    const moved = await prepareEpubEdit(first.xhtml, change, 'ruby-test')
+    const docBelow = mounted(moved.xhtml)
+    const lower = docBelow.querySelector('em ruby')
+    check('EPUB overwrite moves an existing gloss below the word',
+        rect(lower.querySelector('rt')).top > baseRect(lower).top &&
+        docBelow.defaultView.getComputedStyle(lower).rubyPosition === 'under')
+    const removed = await prepareEpubEdit(moved.xhtml, deletion(ruby, 'delete-ruby'), 'ruby-test')
+    const clean = parse(removed.xhtml)
+    check('EPUB deletion preserves other occurrences, publisher ruby, footnote, highlight and inline markup',
+        clean.querySelectorAll('ruby').length === 2 && !clean.querySelector('em ruby') &&
+        clean.querySelector('em [data-anx-hint-highlight]') &&
+        clean.querySelectorAll('aside').length === 2 &&
+        textMap(clean.querySelector('p')).text === 'La lluvia cae. La lluvia vuelve.')
+    const replaced = await prepareEpubEdit(removed.xhtml, { ...ruby, operationId: 'new-ruby' }, 'ruby-test')
+    const repeat = await prepareEpubEdit(replaced.xhtml, deletion(ruby, 'delete-ruby'), 'ruby-test')
+    check('EPUB delete retry cannot remove a newly added gloss', repeat.unchanged)
+    const withoutNotes = await prepareEpubEdit(removed.xhtml, {
+        items: [deletion(footnote, 'delete-note'), deletion(highlight, 'delete-mark')],
+    }, 'ruby-test')
+    const unmarked = parse(withoutNotes.xhtml)
+    check('EPUB note and highlight delete removes popups and wrappers', !unmarked.querySelector('aside, [data-anx-ai-ref], [data-anx-hint-highlight]') &&
+        unmarked.querySelector('em').textContent === 'lluvia')
+    let rejected = false
+    try {
+        await prepareEpubEdit(source, { ...deletion(ruby, 'publisher'), quote: 'hola', contextAfter: 'otra vez.' }, 'ruby-test')
+    } catch { rejected = true }
+    check('Publisher ruby cannot be deleted as an Anx hint', rejected)
+
+    const pdf = mounted('<!doctype html><html data-anx-pdf-page><body><div class="textLayer"><span>La lluvia cae. La lluvia vuelve.</span></div></body></html>')
+    const original = await preparePdfEdits(pdf, { items: [ruby, other, footnote, highlight] }, [])
+    const below = await preparePdfEdits(pdf, change, original.records)
+    await renderPdfHints(pdf, below.records, () => {})
+    const word = pdf.createRange()
+    const node = pdf.querySelector('.textLayer span').firstChild
+    word.setStart(node, 3); word.setEnd(node, 9)
+    const gloss = pdf.querySelector('[data-anx-pdf-hint="ruby"]:last-child')
+    check('PDF renders the moved gloss below and flush left',
+        rect(gloss).top >= word.getBoundingClientRect().bottom - 1 &&
+        Math.abs(rect(gloss).left - word.getBoundingClientRect().left) < 1)
+    const pdfDeleted = await preparePdfEdits(pdf, { items: [
+        deletion(ruby, 'delete-ruby'), deletion(footnote, 'delete-note'), deletion(highlight, 'delete-mark'),
+    ] }, below.records)
+    await renderPdfHints(pdf, pdfDeleted.records, () => {})
+    check('PDF deletion retains only the other occurrence', pdfDeleted.activeCount === 1 &&
+        pdf.querySelectorAll('[data-anx-pdf-hint]').length === 1 &&
+        node.data === 'La lluvia cae. La lluvia vuelve.')
+    const pdfAgain = await preparePdfEdits(pdf, { ...ruby, operationId: 'new-ruby' }, pdfDeleted.records)
+    const pdfRetry = await preparePdfEdits(pdf, deletion(ruby, 'delete-ruby'), pdfAgain.records)
+    check('PDF delete retry cannot remove a newly added gloss', !pdfRetry.changed && pdfRetry.activeCount === 2)
+    return { ok: checks.every(x => x.ok), checks, metrics: [] }
+}
+</script>

@@ -686,6 +686,10 @@ class EpubPlayerState extends ConsumerState<EpubPlayer>
         'missing_context' =>
           'Provide an exact phrase and surrounding context or a verified paragraphHash.',
         'occurrence_missing' => 'The specified occurrence does not exist.',
+        'annotation_not_found' =>
+          'No matching Anx annotation was found at this exact anchor.',
+        'ruby_position_conflict' =>
+          'Use overwrite to move a ruby hint to the other side of the word.',
         'legacy_overlap' =>
           'Overlapping legacy highlights cannot be distinguished safely. Nothing was saved.',
         'invalid_metadata' =>

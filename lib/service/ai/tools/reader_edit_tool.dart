@@ -17,6 +17,24 @@ const readerEditToolIds = [
   'add_book_highlight'
 ];
 
+Map<String, dynamic> _readerEditRequiredFields(bool highlight) => {
+      'required': ['operationId', 'quote'],
+      if (!highlight)
+        'anyOf': [
+          {
+            'required': ['text']
+          },
+          {
+            'required': ['mode'],
+            'properties': {
+              'mode': {
+                'enum': ['delete']
+              },
+            },
+          },
+        ],
+    };
+
 Map<String, dynamic> _readerEditSingleSchema(
         {required bool ruby, bool highlight = false}) =>
     {
@@ -109,20 +127,27 @@ Map<String, dynamic> _readerEditSingleSchema(
         },
         'mode': {
           'type': 'string',
-          'enum': ['append', 'overwrite'],
+          'enum': ['append', 'overwrite', 'delete'],
           'description': ruby
-              ? 'overwrite replaces existing ruby at this verified word in EPUB or PDF. append keeps existing glosses and adds this one (EPUB only). Omit to reject EPUB ruby overlap. Use one items batch for a paragraph.'
-              : 'overwrite replaces existing annotations of THIS SAME TYPE at this exact verified range, preserving other types and other occurrences. For highlights it also clears the old optional comment when the new text is omitted. append or omission adds an annotation.',
+              ? 'delete removes Anx ruby from the verified word; omit text. overwrite replaces existing ruby at this verified word in EPUB or PDF. append keeps existing glosses and adds this one (EPUB only). Omit to reject EPUB ruby overlap. Use one items batch for a paragraph.'
+              : 'delete removes annotations of THIS SAME TYPE at the exact range; omit text. overwrite replaces existing annotations of THIS SAME TYPE at this exact verified range, preserving other types and other occurrences. For highlights it also clears the old optional comment when the new text is omitted. append or omission adds an annotation.',
         },
         if (ruby)
           'alignment': {
             'type': 'string',
             'enum': ['left', 'center', 'right'],
             'description':
-                'Place the gloss above the first, middle or last single word of the quoted phrase; never stretch it across all words. Default left.',
+                'Anchor the gloss to the first, middle or last single word of the quoted phrase; never stretch it across all words. Default left.',
+          },
+        if (ruby)
+          'position': {
+            'type': 'string',
+            'enum': ['above', 'below'],
+            'description':
+                'Vertical placement of a ruby gloss. Default above. Append uses the existing side; use overwrite to move it.',
           },
       },
-      'required': ['operationId', 'quote', if (!highlight) 'text'],
+      ..._readerEditRequiredFields(highlight),
     };
 
 /// A batch shares one bound chapter and is committed atomically.
@@ -165,6 +190,7 @@ Map<String, dynamic> readerEditSchema(
               'tier',
               'tags',
               'alignment',
+              'position',
               'mode',
               'color',
             ])
@@ -175,7 +201,7 @@ Map<String, dynamic> readerEditSchema(
         },
       },
       {
-        'required': ['operationId', 'quote', if (!highlight) 'text'],
+        ..._readerEditRequiredFields(highlight),
         'not': {
           'required': ['items'],
         },
@@ -225,7 +251,15 @@ Map<String, dynamic> parseReaderEditInput(
       jsonEncode(json).length > 16000) {
     throw const FormatException('Unknown fields or input too large');
   }
-  for (final name in ['operationId', 'quote', if (!highlight) 'text']) {
+  final deleting = json['mode'] == 'delete';
+  if (deleting && json['text'] != null) {
+    throw const FormatException('Omit text when deleting an annotation');
+  }
+  for (final name in [
+    'operationId',
+    'quote',
+    if (!highlight && !deleting) 'text',
+  ]) {
     if (json[name] is! String || (json[name] as String).trim().isEmpty) {
       throw FormatException('Missing $name');
     }
@@ -264,7 +298,7 @@ Map<String, dynamic> parseReaderEditInput(
         : ruby
             ? 'ruby'
             : 'footnote',
-    if (highlight) 'text': json['text'] ?? '',
+    if (highlight && !deleting) 'text': json['text'] ?? '',
     if (highlight)
       'color': (json['color'] ?? '#FFE082').toString().toLowerCase()
   };
@@ -302,7 +336,7 @@ Tool buildReaderEditTool(
   return Tool.fromFunction<Map<String, dynamic>, String>(
     name: name,
     description:
-        '${highlight ? 'Persist a colored highlight with an optional plain-text comment at an exact phrase' : ruby ? 'Persist a very brief gloss above one exact Spanish word/phrase' : 'Persist a concise popup footnote anchored to one exact Spanish word/phrase'} in the CURRENT EPUB or PDF page. Use ONLY when user asks to add/save content, not for ordinary explanation. Original text stays visible. EPUB changes are backed up in the source ZIP; PDF annotations are saved in a persistent Anx sidecar without changing the PDF bytes. Exact quote plus surrounding context is required. No arbitrary HTML/JS, no filesystem paths. Use items for an atomic batch of up to 50 annotations, with one save/reload. Current chapter href: ${chapterHref ?? '(unavailable)'}.',
+        '${highlight ? 'Persist a colored highlight with an optional plain-text comment at an exact phrase' : ruby ? 'Persist a very brief gloss above or below one exact Spanish word/phrase' : 'Persist a concise popup footnote anchored to one exact Spanish word/phrase'} in the CURRENT EPUB or PDF page. Use ONLY when user asks to add, change or delete an annotation, not for ordinary explanation. Original text stays visible. EPUB changes are backed up in the source ZIP; PDF annotations are saved in a persistent Anx sidecar without changing the PDF bytes. Exact quote plus surrounding context is required. No arbitrary HTML/JS, no filesystem paths. Use items for an atomic batch of up to 50 annotations, with one save/reload. Current chapter href: ${chapterHref ?? '(unavailable)'}.',
     inputJsonSchema: readerEditSchema(ruby: ruby, highlight: highlight),
     getInputFromJson: (json) =>
         parseReaderEditInput(json, ruby: ruby, highlight: highlight),
@@ -370,7 +404,7 @@ final addBookRubyToolDefinition = AiToolDefinition(
   id: readerEditToolIds[1],
   displayNameBuilder: (_) => 'Add word hint',
   descriptionBuilder: (_) =>
-      'Save a brief translation above the start, middle, or end of a phrase.',
+      'Add, replace or delete a brief gloss above or below an exact word.',
   build: (context) => buildReaderEditTool(
     context.ref,
     ruby: true,

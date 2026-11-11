@@ -31,7 +31,9 @@ export function validateEpubEdit(input) {
     const contextAfter = normalize(requireText(input.contextAfter ?? '', 'contextAfter', 300, true))
     if (!contextBefore && !contextAfter && !input.paragraphHash)
         throw new Error('An exact quote needs surrounding context or a verified paragraph hash')
-    const text = requireText(input.text ?? (type === 'highlight' ? '' : null), 'text', type === 'ruby' ? 32 : 1200, type === 'highlight').trim()
+    const deleting = input.mode === 'delete'
+    if (deleting && input.text != null && input.text !== '') throw new Error('Omit text when deleting an annotation')
+    const text = deleting ? '' : requireText(input.text ?? (type === 'highlight' ? '' : null), 'text', type === 'ruby' ? 32 : 1200, type === 'highlight').trim()
     const color = input.color ?? '#ffe082'
     if (type === 'highlight' && !/^#[a-f0-9]{6}$/i.test(color)) throw new Error('Invalid highlight color')
     const group = requireText(input.group ?? 'Spanish tutor', 'group', 64)
@@ -40,8 +42,11 @@ export function validateEpubEdit(input) {
     if (![1, 2, 3].includes(tier)) throw new Error('tier must be 1, 2 or 3')
     const alignment = input.alignment ?? 'left'
     if (!['left', 'center', 'right'].includes(alignment)) throw new Error('Invalid alignment')
-    if (input.mode != null && !['append', 'overwrite'].includes(input.mode))
+    if (input.mode != null && !['append', 'overwrite', 'delete'].includes(input.mode))
         throw new Error('Invalid annotation mode')
+    const position = input.position
+    if (position != null && (type !== 'ruby' || !['above', 'below'].includes(position)))
+        throw new Error('Invalid ruby position')
     const occurrence = input.occurrence
     if (occurrence != null && (!Number.isInteger(occurrence) || occurrence < 1))
         throw new Error('Invalid occurrence')
@@ -54,6 +59,7 @@ export function validateEpubEdit(input) {
     return { type, operationId, quote, contextBefore, contextAfter, text, group, tier,
         alignment, occurrence: occurrence ?? null, paragraphHash, paragraphIndex,
         ...(input.mode != null ? { mode: input.mode } : {}),
+        ...(position != null ? { position } : {}),
         ...(Object.keys(tags).length ? { tags } : {}), ...(type === 'highlight' ? { color: color.toLowerCase() } : {}) }
 }
 
@@ -121,7 +127,7 @@ function added(doc, name, spec) {
     return el
 }
 
-// The gloss lives above one word at the selected edge/centre of the phrase.
+// Anchor a gloss to one word at the selected edge/centre of the phrase.
 // Every original inline element remains in place; no Range.extractContents or
 // letter-spacing/table layout can split and stretch the original phrase.
 function insertRuby(doc, anchor, spec) {
@@ -131,10 +137,22 @@ function insertRuby(doc, anchor, spec) {
     const start = anchor.map.starts[anchor.start + selected.index]
     const end = anchor.map.ends[anchor.start + selected.index + selected[0].length - 1]
     const segments = anchor.map.nodes.filter(x => x.end > start && x.start < end)
+    const existing = segments[0]?.node.parentElement.closest('ruby')
+    if (spec.mode === 'delete') {
+        if (!existing?.hasAttribute('data-anx-ai-ruby') ||
+            !segments.every(({ node }) => existing.contains(node)) ||
+            textMap(existing).text !== selected[0])
+            throw new Error('No matching Anx ruby to delete')
+        const removed = [existing.getAttribute('data-anx-edit-id'),
+            ...[...existing.querySelectorAll('rt [data-anx-edit-id]')].map(el => el.getAttribute('data-anx-edit-id'))]
+        // Preserve the original word, inline formatting and any other annotations.
+        existing.replaceWith(...[...existing.childNodes].filter(
+            child => !['rt', 'rp', 'rtc'].includes(child.localName)))
+        return removed.filter(Boolean)
+    }
     if (segments.length !== 1)
         throw new Error('The gloss anchor word crosses inline markup; use a nearby single word')
     const { node, start: nodeStart } = segments[0]
-    const existing = node.parentElement.closest('ruby')
     if (existing) {
         // Change only the verified whole base word, never every matching word
         // or a substring of a publisher's longer ruby phrase.
@@ -143,6 +161,9 @@ function insertRuby(doc, anchor, spec) {
         const annotations = [...existing.children].filter(child => child.localName === 'rt')
         if (annotations.length !== 1) throw new Error('Existing ruby has complex annotation markup')
         const rt = annotations[0]
+        if (spec.mode === 'append' && spec.position &&
+            spec.position !== (existing.getAttribute('data-anx-ruby-position') ?? 'above'))
+            throw new Error('Use overwrite to change ruby position')
         const replaced = []
         if (spec.mode === 'overwrite') {
             replaced.push(existing.getAttribute('data-anx-edit-id'),
@@ -150,6 +171,7 @@ function insertRuby(doc, anchor, spec) {
             for (const attr of [...rt.attributes]) rt.removeAttributeNode(attr)
             rt.replaceChildren()
             existing.setAttribute('data-anx-edit-id', spec.operationId)
+            setRubyPlacement(existing, spec)
         } else if (!rt.hasAttribute('data-anx-ruby-container')) {
             const old = doc.createElementNS(XHTML, 'span')
             for (const attr of [...rt.attributes]) old.setAttributeNS(attr.namespaceURI, attr.name, attr.value)
@@ -172,13 +194,20 @@ function insertRuby(doc, anchor, spec) {
     ruby.setAttribute('data-anx-edit-wrap', 'ruby')
     ruby.setAttribute('data-anx-ai-ruby', '1')
     ruby.setAttribute('data-anx-edit-id', spec.operationId)
-    ruby.setAttribute('class', `anx-edit-ruby anx-edit-align-${spec.alignment}`)
+    setRubyPlacement(ruby, spec)
     ruby.appendChild(doc.createTextNode(node.data.slice(from, to)))
     const rt = added(doc, 'rt', spec)
     rt.textContent = spec.text
     ruby.appendChild(rt)
     node.replaceWith(doc.createTextNode(node.data.slice(0, from)), ruby,
         doc.createTextNode(node.data.slice(to)))
+}
+
+function setRubyPlacement(ruby, spec) {
+    ruby.classList.add('anx-edit-ruby')
+    ruby.classList.remove('anx-edit-align-left', 'anx-edit-align-center', 'anx-edit-align-right')
+    ruby.classList.add(`anx-edit-align-${spec.alignment}`)
+    ruby.setAttribute('data-anx-ruby-position', spec.position ?? 'above')
 }
 
 function insertFootnote(doc, anchor, spec, number) {
@@ -236,7 +265,7 @@ function insertHighlight(doc, anchor, spec, number) {
     }
 }
 
-const styles = `.anx-edit-ref-wrap{font-size:inherit!important;line-height:0!important;vertical-align:baseline!important}.anx-edit-noteref{font-size:.62em!important;line-height:0!important;vertical-align:super!important;white-space:nowrap!important;text-decoration:none!important}.anx-edit-ruby{ruby-position:over!important;ruby-align:center!important;letter-spacing:normal!important;word-spacing:normal!important}.anx-edit-ruby rt{font-size:.48em!important;line-height:1!important;letter-spacing:normal!important;word-spacing:normal!important}.anx-edit-align-left rt{text-align:left!important}.anx-edit-align-right rt{text-align:right!important}[data-anx-edit-added][hidden]{display:none!important}[data-anx-ruby-gloss]:not([hidden]):not([data-anx-hint-filtered])~[data-anx-ruby-gloss]:not([hidden]):not([data-anx-hint-filtered])::before{content:' · '}`
+const styles = `.anx-edit-ref-wrap{font-size:inherit!important;line-height:0!important;vertical-align:baseline!important}.anx-edit-noteref{font-size:.62em!important;line-height:0!important;vertical-align:super!important;white-space:nowrap!important;text-decoration:none!important}.anx-edit-ruby{ruby-position:over!important;ruby-align:center!important;letter-spacing:normal!important;word-spacing:normal!important}.anx-edit-ruby[data-anx-ruby-position="below"]{ruby-position:under!important}.anx-edit-ruby.anx-edit-align-left{ruby-align:start!important}.anx-edit-ruby rt{font-size:.48em!important;line-height:1!important;letter-spacing:normal!important;word-spacing:normal!important}.anx-edit-align-left rt{text-align:left!important}.anx-edit-align-right rt{text-align:right!important}[data-anx-edit-added][hidden]{display:none!important}[data-anx-ruby-gloss]:not([hidden]):not([data-anx-hint-filtered])~[data-anx-ruby-gloss]:not([hidden]):not([data-anx-hint-filtered])::before{content:' · '}`
 
 function groupRuntime() {
     const doc = document
@@ -340,8 +369,9 @@ function sameAnchor(a, b) {
     return a.paragraphHash === b.paragraphHash && a.paragraphIndex === b.paragraphIndex && a.start === b.start && a.end === b.end
 }
 
-function removeOverwrittenEdits(doc, anchor, spec, records) {
+function removeMatchingEdits(doc, anchor, spec, records) {
     const replaced = records.filter(record => !record.superseded && record.type === spec.type && sameAnchor(record.anchor, anchor))
+    if (!replaced.length && spec.mode === 'delete') throw new Error('No matching Anx annotation to delete')
     const ids = new Set(replaced.map(record => record.operationId))
     const highlights = [...doc.querySelectorAll('[data-anx-edit-wrap="highlight"]')]
         .filter(element => ids.has(element.getAttribute('data-anx-edit-id')))
@@ -405,17 +435,20 @@ async function prepareSingleEpubEdit(source, input, bookKey) {
         start: anchor.start, end: anchor.end, quote: spec.quote }
     const semanticHash = await hash(JSON.stringify({ type: spec.type, anchor: stableAnchor,
         text: normalize(spec.text), group: spec.group, tier: spec.tier,
-        alignment: spec.type === 'ruby' ? spec.alignment : null, ...(spec.mode ? { mode: spec.mode } : {}), ...(spec.tags ? { tags: spec.tags } : {}), ...(spec.type === 'highlight' ? { color: spec.color } : {}) }))
+        alignment: spec.type === 'ruby' ? spec.alignment : null, ...(spec.position === 'below' ? { position: 'below' } : {}), ...(spec.mode ? { mode: spec.mode } : {}), ...(spec.tags ? { tags: spec.tags } : {}), ...(spec.type === 'highlight' ? { color: spec.color } : {}) }))
     const sameEdit = records.find(x => !x.superseded && x.semanticHash === semanticHash)
     if (sameEdit && spec.mode !== 'overwrite') return { unchanged: true, anchor: sameEdit.anchor, operationId: sameEdit.operationId }
-    if (spec.mode === 'overwrite' && spec.type !== 'ruby') removeOverwrittenEdits(doc, anchor, spec, records)
+    if (['overwrite', 'delete'].includes(spec.mode) && spec.type !== 'ruby') removeMatchingEdits(doc, anchor, spec, records)
     if (spec.type === 'ruby') {
         const replaced = insertRuby(doc, anchor, spec) ?? []
         for (const record of records) if (replaced.includes(record.operationId)) record.superseded = true
+    } else if (spec.mode !== 'delete') {
+        const number = records.filter(x => x.type === 'footnote' || x.type === 'highlight' && x.text).length + 1
+        if (spec.type === 'highlight') insertHighlight(doc, anchor, spec, number)
+        else insertFootnote(doc, anchor, spec, number)
     }
-    else if (spec.type === 'highlight') insertHighlight(doc, anchor, spec, records.filter(x => x.type === 'footnote' || x.type === 'highlight' && x.text).length + 1)
-    else insertFootnote(doc, anchor, spec, records.filter(x => x.type === 'footnote' || x.type === 'highlight' && x.text).length + 1)
     records.push({ operationId: spec.operationId, type: spec.type, requestHash, semanticHash,
+        ...(spec.mode === 'delete' ? { superseded: true } : {}),
         group: spec.group, tier: spec.tier, ...(spec.type === 'highlight' ? { text: spec.text } : {}), ...(spec.tags ? { tags: spec.tags } : {}), anchor: stableAnchor })
     if (!metadata) {
         metadata = doc.createElementNS(XHTML, 'script')
@@ -476,6 +509,8 @@ export async function prepareEpubEditForBridge(source, input, bookKey) {
             : message.startsWith('operationId was already used') ? 'operation_collision'
             : message.startsWith('An exact quote needs surrounding context') ? 'missing_context'
             : message.startsWith('Requested occurrence does not exist') ? 'occurrence_missing'
+            : message.startsWith('No matching Anx') ? 'annotation_not_found'
+            : message.startsWith('Use overwrite to change ruby position') ? 'ruby_position_conflict'
             : message.startsWith('Overlapping legacy highlights') ? 'legacy_overlap'
             : message.includes('edit metadata') ? 'invalid_metadata'
             : message.includes('XHTML') ? 'invalid_xhtml' : 'invalid_input'

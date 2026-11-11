@@ -67,12 +67,14 @@ export async function preparePdfEdits(doc, input, records) {
         if (!anchorRange(doc, anchor).getClientRects().length) throw new Error('PDF phrase has no visible text geometry')
         const stable = { paragraphHash: anchor.paragraphHash, paragraphIndex: anchor.paragraphIndex,
             start: anchor.start, end: anchor.end, quote: spec.quote }
-        if (spec.mode === 'overwrite') {
+        if (spec.mode === 'overwrite' || spec.mode === 'delete') {
             const target = effectiveAnchor(spec, stable)
-            for (const record of next) if (!record.superseded && record.spec.type === spec.type &&
-                sameAnchor(effectiveAnchor(record.spec, record.anchor), target)) record.superseded = true
+            const matching = next.filter(record => !record.superseded && record.spec.type === spec.type &&
+                sameAnchor(effectiveAnchor(record.spec, record.anchor), target))
+            if (spec.mode === 'delete' && !matching.length) throw new Error('No matching Anx annotation to delete')
+            for (const record of matching) record.superseded = true
         }
-        const record = { spec, requestHash, anchor: stable }
+        const record = { spec, requestHash, anchor: stable, ...(spec.mode === 'delete' ? { superseded: true } : {}) }
         next.push(record)
         results.push({ changed: true, operationId: spec.operationId, anchor: stable })
     }
@@ -125,7 +127,8 @@ export async function renderPdfHints(doc, records, showComment) {
             const height = Math.max(8, r.height * .45)
             const x = spec.alignment === 'right' ? r.right : spec.alignment === 'center' ? (r.left + r.right) / 2 : r.left
             const translate = spec.alignment === 'right' ? '-100%' : spec.alignment === 'center' ? '-50%' : '0'
-            el.style.cssText = `position:absolute;left:${Math.max(0,x)}px;top:${Math.max(0,r.top-height)}px;transform:translateX(${translate});font:${height}px sans-serif;line-height:1;white-space:nowrap;color:#111;background:#ffffffe6;border-radius:2px;max-width:95%;overflow:hidden;text-overflow:ellipsis`
+            const y = spec.position === 'below' ? r.bottom : Math.max(0, r.top - height)
+            el.style.cssText = `position:absolute;left:${Math.max(0,x)}px;top:${y}px;transform:translateX(${translate});font:${height}px sans-serif;line-height:1;white-space:nowrap;color:#111;background:#ffffffe6;border-radius:2px;max-width:95%;overflow:hidden;text-overflow:ellipsis`
             root.appendChild(el)
         } else if (spec.type === 'footnote' || spec.type === 'highlight' && spec.text) {
             const r = rects.at(-1)

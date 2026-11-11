@@ -91,14 +91,28 @@ const _sliceWithWindow = (text, start, end) => {
   return text.slice(safeStart, safeEnd);
 };
 
-const buildRangeContextText = (range) => {
-  if (!range) return '';
+const rubyAnnotationSelector = 'rt, rp, .rl-gloss, [data-anx-ruby-gloss]';
 
-  const selectionText = range.toString().trim();
+const isRubyAnnotation = node =>
+  (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)
+    ?.closest(rubyAnnotationSelector);
+
+const selectedBookText = (range, selection) => {
+  if (isRubyAnnotation(range.commonAncestorContainer)) return '';
+  const fragment = range.cloneContents();
+  const annotations = fragment.querySelectorAll(rubyAnnotationSelector);
+  if (!annotations.length) return selection.toString() || range.toString();
+  annotations.forEach(node => node.remove());
+  return fragment.textContent;
+};
+
+const buildRangeContextText = (range, selectionText) => {
   const startNode = range.startContainer;
   const endNode = range.endContainer;
-  const startText = startNode?.textContent ?? '';
-  const endText = endNode?.textContent ?? '';
+  const contextFrom = node =>
+    node.nodeType === Node.TEXT_NODE && !isRubyAnnotation(node) ? node.data : '';
+  const startText = contextFrom(startNode);
+  const endText = contextFrom(endNode);
 
   let contextText = '';
 
@@ -150,20 +164,14 @@ const handleSelection = (view, doc, index) => {
   const range = getSelectionRange(selection);
 
   if (!range) return;
+  const text = selectedBookText(range, selection);
+  if (!text.trim()) return;
 
   const position = getPosition(range);
   const cfi = view.getCFI(index, range);
   const lang = 'en-US'
 
-  let text = selection.toString();
-  if (!text) {
-    const newSelection = range.startContainer.ownerDocument.getSelection();
-    newSelection.removeAllRanges();
-    newSelection.addRange(range);
-    text = newSelection.toString();
-  }
-
-  const contextText = buildRangeContextText(range);
+  const contextText = buildRangeContextText(range, text.trim());
 
   onSelectionEnd({
     index,
@@ -177,8 +185,13 @@ const handleSelection = (view, doc, index) => {
 };
 
 const setSelectionHandler = (view, doc, index) => {
+  const selectionStyle = doc.createElement('style');
+  selectionStyle.textContent =
+    `${rubyAnnotationSelector} { -webkit-user-select: none !important; user-select: none !important; }`;
+  doc.head?.append(selectionStyle);
+
   let hasActiveSelection = false;
-  let lastPointerUpRange = null;
+  let lastReportedRange = null;
   doc.__anxSelectionClearedAt = 0;
   doc.__anxSuppressClick = false;
 
@@ -194,7 +207,7 @@ const setSelectionHandler = (view, doc, index) => {
 
     if (!hasActiveSelection) return;
     hasActiveSelection = false;
-    lastPointerUpRange = null;
+    lastReportedRange = null;
     doc.__anxSelectionClearedAt = Date.now();
     doc.__anxSuppressClick = true;
     callFlutter('onSelectionCleared');
@@ -209,15 +222,15 @@ const setSelectionHandler = (view, doc, index) => {
     && a.endOffset === b.endOffset
   );
 
-  const shouldSkipPointerUp = () => {
+  const isRepeatedSelection = () => {
     const selectionRange = getSelectionRange(doc.getSelection());
     if (!selectionRange) return false;
 
-    if (lastPointerUpRange && rangesEqual(lastPointerUpRange, selectionRange)) {
+    if (lastReportedRange && rangesEqual(lastReportedRange, selectionRange)) {
       return true;
     }
 
-    lastPointerUpRange = selectionRange.cloneRange();
+    lastReportedRange = selectionRange.cloneRange();
     return false;
   };
 
@@ -228,7 +241,7 @@ const setSelectionHandler = (view, doc, index) => {
     || navigator.platform.includes('iPad')
   ) {
     doc.addEventListener('pointerup', () => {
-      if (shouldSkipPointerUp()) return;
+      if (isRepeatedSelection()) return;
       handleSelection(view, doc, index);
     });
   }
@@ -253,7 +266,7 @@ const setSelectionHandler = (view, doc, index) => {
       // for mouse pointerup, handle selection directly
       doc.addEventListener('pointerup', (e) => {
         if (e.pointerType === 'touch') return;
-        if (shouldSkipPointerUp()) return;
+        if (isRepeatedSelection()) return;
         handleSelection(view, doc, index);
       });
 
@@ -284,7 +297,7 @@ const setSelectionHandler = (view, doc, index) => {
 
     } else {
       doc.addEventListener('pointerup', () => {
-        if (shouldSkipPointerUp()) return;
+        if (isRepeatedSelection()) return;
         handleSelection(view, doc, index);
       });
     }
@@ -308,37 +321,22 @@ const setSelectionHandler = (view, doc, index) => {
       }, 600);
     });
   } else { // Android
-    let hasNativeSelectionStarted = false;
-
-    doc.addEventListener('pointerdown', () => {
-      hasNativeSelectionStarted = false;
-    });
-
-    // When the native selection handles appear, the browser loses control of the pointer
-    // This event signals that the user has started dragging handles
-    doc.addEventListener('pointercancel', () => {
-      hasNativeSelectionStarted = true;
-    });
-
-    doc.addEventListener('contextmenu', e => {
-      // Allow mouse context menu (if any)
-      if (e.pointerType === 'mouse') {
+    // WebView can select a word without sending a second contextmenu event
+    // or a pointerup. Selection changes also cover native handle adjustments.
+    let selectionTimer;
+    const scheduleSelection = () => {
+      clearTimeout(selectionTimer);
+      if (!getSelectionRange(doc.getSelection())) return;
+      selectionTimer = setTimeout(() => {
+        if (!getSelectionRange(doc.getSelection()) || isRepeatedSelection()) return;
         handleSelection(view, doc, index);
-        return;
-      }
+      }, 300);
+    };
 
-      // If we haven't lost pointer control yet (no pointercancel),
-      // this is the "early" long-press event during drag start.
-      // We block it to prevent the custom menu from interfering with the drag.
-      if (!hasNativeSelectionStarted) {
-        e.preventDefault();
-        return;
-      }
-
-      // If we have entered native selection mode (pointercancel happened),
-      // this contextmenu event is likely triggered by the system or user interaction
-      // after the selection phase (e.g. on release). We handle it.
-      handleSelection(view, doc, index);
+    doc.addEventListener('selectionchange', scheduleSelection);
+    doc.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      scheduleSelection();
     });
   }
   // doc.addEventListener('selectionchange', () => handleSelection(view, doc, index));

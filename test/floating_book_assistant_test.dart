@@ -32,6 +32,8 @@ void main() {
       var bookTaps = 0;
       var hintsOpened = 0;
       var illustrationsOpened = 0;
+      var closes = 0;
+      var voiceStarts = 0;
       var reusePrevious = true;
       final turn = BookAssistantTurn(
         prepare: () async {},
@@ -67,8 +69,11 @@ void main() {
                       session: session,
                       turn: turn,
                       scope: () => 'book',
-                      startVoice: (_) async {},
-                      close: () {},
+                      startVoice: (language) {
+                        voiceStarts++;
+                        return session.start(language: language);
+                      },
+                      close: () => closes++,
                       history: () {},
                       hints: () => hintsOpened++,
                       illustrations: () => illustrationsOpened++,
@@ -88,7 +93,7 @@ void main() {
       expect(find.text('BOOK'), findsOneWidget);
       expect(
         tester.getSize(find.byType(Column).first).height,
-        lessThanOrEqualTo(64),
+        lessThanOrEqualTo(90),
       );
       await session.start();
       await tester.pump();
@@ -116,11 +121,10 @@ void main() {
       expect(bubble, findsNothing);
       expect(find.byTooltip('Show conversation'), findsOneWidget);
       expect(session.state, AssistantState.listening);
-      await tester.tap(find.byTooltip('Assistant menu'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Reading hints'));
+      await tester.tap(find.byTooltip('Reading hints'));
       await tester.pumpAndSettle();
       expect(hintsOpened, 1);
+      expect(bubble, findsNothing);
       await tester.tap(find.byTooltip('Assistant menu'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Illustrations'));
@@ -128,9 +132,43 @@ void main() {
       expect(illustrationsOpened, 1);
       await tester.tap(find.byTooltip('Assistant menu'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Reuse previous chat'));
+      await tester.tap(find.byType(CheckedPopupMenuItem<String>));
       await tester.pumpAndSettle();
       expect(reusePrevious, false);
+      await tester.tap(find.byTooltip('Close assistant'));
+      expect(closes, 1);
+      await tester.drag(find.text('BOOK'), const Offset(0, -100));
+      await tester.pump();
+      expect(bubble, findsNothing);
+      await tester.tap(find.text('BOOK'));
+      await tester.pump();
+      expect(bubble, findsOneWidget);
+      expect(bookTaps, 2);
+      expect(session.state, AssistantState.listening);
+      await session.pause();
+      final target = find.byKey(const ValueKey('assistant-dismiss-target'));
+      final hold = await tester.startGesture(tester.getCenter(bubble));
+      await tester.pump(const Duration(milliseconds: 550));
+      expect(target, findsOneWidget);
+      expect(voiceStarts, 0);
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(voiceStarts, 1);
+      expect(session.state, AssistantState.listening);
+      await hold.up();
+      await tester.pump();
+      expect(target, findsNothing);
+      expect(closes, 1);
+
+      await session.pause();
+      final drag = await tester.startGesture(tester.getCenter(bubble));
+      await tester.pump(const Duration(milliseconds: 550));
+      await drag.moveTo(tester.getCenter(target));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(voiceStarts, 1);
+      await drag.up();
+      await tester.pump();
+      expect(target, findsNothing);
+      expect(closes, 2);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       session.dispose();

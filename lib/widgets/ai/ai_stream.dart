@@ -22,6 +22,7 @@ class AiStream extends ConsumerStatefulWidget {
     this.canCopy = true,
     this.regenerate = false,
     this.useAgent = false,
+    this.compactTranslation = false,
   });
 
   final PromptTemplatePayload prompt;
@@ -30,6 +31,7 @@ class AiStream extends ConsumerStatefulWidget {
   final bool canCopy;
   final bool regenerate;
   final bool useAgent;
+  final bool compactTranslation;
 
   @override
   AiStreamState createState() => AiStreamState();
@@ -61,6 +63,9 @@ class AiStreamState extends ConsumerState<AiStream> {
     return StreamBuilder<String>(
       stream: stream,
       builder: (context, snapshot) {
+        if (widget.compactTranslation) {
+          return _buildTranslation(context, snapshot);
+        }
         if (snapshot.hasError) {
           return Text(snapshot.error.toString());
         }
@@ -123,6 +128,53 @@ class AiStreamState extends ConsumerState<AiStream> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildTranslation(
+      BuildContext context, AsyncSnapshot<String> snapshot) {
+    final l10n = L10n.of(context);
+    final theme = Theme.of(context);
+    final answer = parseReasoningContent(snapshot.data ?? '')
+        .answerTimeline
+        .map((entry) => entry.text)
+        .whereType<String>()
+        .join('\n')
+        .trim();
+    final done = snapshot.connectionState == ConnectionState.done;
+    if (snapshot.hasError || (done && answer.isEmpty)) {
+      return Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(l10n.translateError.trim()),
+          TextButton(
+            onPressed: () => setState(() => stream = _createStream(true)),
+            child: Text(l10n.commonRetry),
+          ),
+        ],
+      );
+    }
+    if (answer.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: LinearProgressIndicator(),
+      );
+    }
+    final newline = answer.indexOf('\n');
+    return SelectableText.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: newline < 0 ? answer : answer.substring(0, newline),
+            style: theme.textTheme.titleMedium,
+          ),
+          if (newline >= 0)
+            TextSpan(
+              text: '\n${answer.substring(newline + 1).trimLeft()}',
+              style: theme.textTheme.bodyMedium,
+            ),
+        ],
+      ),
     );
   }
 

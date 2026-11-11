@@ -43,7 +43,8 @@ class AiTranslateProvider extends TranslateServiceProvider {
 
     return AiStream(
       prompt: prompt,
-      regenerate: true,
+      regenerate: isFullText,
+      compactTranslation: !isFullText,
     );
   }
 

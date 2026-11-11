@@ -547,11 +547,22 @@ class _ContextMenuOverlayState extends State<_ContextMenuOverlay>
                           AxisFlex(
                             axis: widget.axis,
                             children: [
-                              TranslationMenu(
-                                content: widget.annoContent,
-                                decoration: widget.decoration,
-                                axis: widget.axis,
-                                contextText: widget.contextText,
+                              Expanded(
+                                child: NotificationListener<
+                                    SizeChangedLayoutNotification>(
+                                  onNotification: (_) {
+                                    _scheduleRecalculate();
+                                    return false;
+                                  },
+                                  child: SizeChangedLayoutNotifier(
+                                    child: TranslationMenu(
+                                      content: widget.annoContent,
+                                      decoration: widget.decoration,
+                                      axis: widget.axis,
+                                      contextText: widget.contextText,
+                                    ),
+                                  ),
+                                ),
                               ),
                             ],
                           ),
